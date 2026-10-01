@@ -69,6 +69,20 @@ class Portfolio:
         account_id: model.AccountId | None = None,
         target_currency: model.Currency | None = None,
     ) -> dict: ...
+    def register_statistic(self, statistic: typing.Any) -> None: ...
+    def deregister_statistic(self, statistic: typing.Any) -> None: ...
+    def unrealized_pnls_for_strategy(
+        self,
+        strategy_id: model.StrategyId,
+        venue: model.Venue | None = None,
+        target_currency: model.Currency | None = None,
+    ) -> dict: ...
+    def realized_pnls_for_strategy(
+        self,
+        strategy_id: model.StrategyId,
+        venue: model.Venue | None = None,
+        target_currency: model.Currency | None = None,
+    ) -> dict: ...
     def total_pnls(
         self,
         venue: model.Venue | None = None,

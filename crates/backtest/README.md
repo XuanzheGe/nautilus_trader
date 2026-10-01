@@ -42,6 +42,19 @@ This crate provides feature flags to control source code inclusion during compil
 - `python`: Enables Python bindings from [PyO3](https://pyo3.rs).
 - `streaming`: Enables the `nautilus-persistence` dependency for streaming configuration.
 
+## Strategy workbench
+
+Run the local interactive strategy workbench with:
+
+```bash
+cargo run --release -p nautilus-backtest --features examples,high-precision \
+  --example workbench-serve
+```
+
+Open <http://127.0.0.1:8787> to explore parameters, floating PnL, equity and drawdown,
+compare runs, and export results. See the [workbench guide](../../docs/how_to/use_strategy_workbench.md)
+for sampling semantics and extension points.
+
 ## Documentation
 
 See [the docs](https://docs.rs/nautilus-backtest) for more detailed usage.

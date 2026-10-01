@@ -1,0 +1,992 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NautilusTrader · Strategy workbench</title>
+<style>
+  :root {
+    /* Neutrals carry a slight blue bias so they read as chosen, not inherited grey. */
+    --ground: #f6f7f9;
+    --surface: #ffffff;
+    --sunken: #eef1f5;
+    --line: #d9dee6;
+    --line-soft: #e7ebf1;
+    --ink: #171d26;
+    --ink-dim: #5b6775;
+    --ink-faint: #8b97a6;
+    /* Amber is the selection accent: gains and losses already own green and red. */
+    --accent: #95640f;
+    --accent-soft: #f2e4cb;
+    --gain: #196f46;
+    --loss: #a02d26;
+    --grid: #e4e8ee;
+    --shadow: 0 1px 2px rgba(23, 29, 38, .06);
+  }
+  :root:not([data-theme="light"]) { }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #11151b;
+      --surface: #181e27;
+      --sunken: #141a22;
+      --line: #2a323e;
+      --line-soft: #222a35;
+      --ink: #e2e8f0;
+      --ink-dim: #95a2b3;
+      --ink-faint: #6d7a8b;
+      --accent: #d9a24b;
+      --accent-soft: #33291a;
+      --gain: #4fb683;
+      --loss: #e0685e;
+      --grid: #232b36;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #11151b;
+    --surface: #181e27;
+    --sunken: #141a22;
+    --line: #2a323e;
+    --line-soft: #222a35;
+    --ink: #e2e8f0;
+    --ink-dim: #95a2b3;
+    --ink-faint: #6d7a8b;
+    --accent: #d9a24b;
+    --accent-soft: #33291a;
+    --gain: #4fb683;
+    --loss: #e0685e;
+    --grid: #232b36;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 400 14px/1.5 "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+
+  .shell { max-width: 1180px; margin: 0 auto; padding: 28px 24px 56px; display: flex; flex-direction: column; gap: 22px; }
+
+  /* ---- header ---- */
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.01em; text-wrap: balance; }
+  .sub { color: var(--ink-dim); font-size: 13px; }
+  .sub code { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--ink-faint); }
+
+  /* ---- run picker: a segmented control, the "click to run" affordance ---- */
+  .runs { display: flex; flex-wrap: wrap; gap: 0; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: var(--surface); box-shadow: var(--shadow); }
+  .run {
+    appearance: none; border: 0; border-right: 1px solid var(--line-soft); background: transparent;
+    color: var(--ink-dim); font: 500 13px/1 "IBM Plex Sans", sans-serif; padding: 11px 16px;
+    display: flex; align-items: center; gap: 9px; cursor: pointer; transition: background .12s, color .12s;
+  }
+  .run:last-child { border-right: 0; }
+  .run:hover { background: var(--sunken); color: var(--ink); }
+  .run[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .run:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .chip {
+    font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+    padding: 2px 5px; border-radius: 3px; border: 1px solid var(--line); color: var(--ink-faint);
+  }
+  .chip.warn { border-color: var(--loss); color: var(--loss); }
+
+  /* ---- summary strip: hairline-separated figures, not a row of rounded cards ---- */
+  .strip {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .fig { padding: 14px 18px; border-right: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 5px; }
+  .fig:last-child { border-right: 0; }
+  .fig .k { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-faint); }
+  .fig .v { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; font-size: 19px; font-weight: 500; letter-spacing: -.02em; }
+  .fig .n { font-size: 11.5px; color: var(--ink-dim); }
+  .pos { color: var(--gain); } .neg { color: var(--loss); }
+
+  /* ---- chart ---- */
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
+  .panel-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 13px 18px; border-bottom: 1px solid var(--line-soft); }
+  .panel-hd h2 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: .01em; }
+  .panel-hd .hint { font-size: 11.5px; color: var(--ink-faint); }
+  .chart-wrap { padding: 10px 8px 4px; position: relative; }
+  svg { display: block; width: 100%; height: auto; }
+  .readout {
+    position: absolute; top: 14px; left: 56px; display: none; gap: 14px;
+    font-family: "IBM Plex Mono", monospace; font-size: 11.5px; font-variant-numeric: tabular-nums;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 5px 9px;
+    pointer-events: none; white-space: nowrap;
+  }
+  .readout.on { display: flex; }
+  .readout .lbl { color: var(--ink-faint); }
+
+  /* ---- statistics table ---- */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 0; }
+  .group { border-right: 1px solid var(--line-soft); }
+  .group:last-child { border-right: 0; }
+  .group h3 {
+    margin: 0; padding: 12px 18px 8px; font-size: 10.5px; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--ink-faint); font-weight: 600;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 5px 18px; font-size: 12.5px; vertical-align: baseline; }
+  td.k { color: var(--ink-dim); }
+  td.v { text-align: right; font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr:nth-child(even) { background: var(--sunken); }
+  .nan { color: var(--ink-faint); }
+  .flag { color: var(--accent); font-size: 10.5px; margin-left: 5px; }
+
+  .note {
+    font-size: 12.5px; color: var(--ink-dim); line-height: 1.65;
+    border-left: 2px solid var(--accent); padding: 2px 0 2px 13px; max-width: 68ch;
+  }
+  .note b { color: var(--ink); font-weight: 600; }
+
+
+  /* ---- header layout with the strategy picker on the right ---- */
+  header { justify-content: space-between; align-items: flex-end; }
+  .title { display: flex; flex-direction: column; gap: 4px; }
+
+  /* ---- parameter controls ---- */
+  .controls { padding: 15px 18px 14px; }
+  .axes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px 28px; }
+  .axis { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "k v" "s s"; gap: 4px 10px; align-items: center; }
+  .axis .k { grid-area: k; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-faint); }
+  .axis .k .unit { text-transform: none; letter-spacing: 0; margin-left: 6px; color: var(--line); }
+  .axis .v { grid-area: v; font-size: 15px; font-weight: 600; color: var(--accent); }
+  .axis input[type="range"] {
+    grid-area: s; width: 100%; margin: 0; height: 18px; appearance: none; background: transparent; cursor: pointer;
+  }
+  .axis input[type="range"]::-webkit-slider-runnable-track { height: 3px; border-radius: 2px; background: var(--line); }
+  .axis input[type="range"]::-webkit-slider-thumb {
+    appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--accent);
+    border: 2px solid var(--surface); margin-top: -5.5px; box-shadow: 0 0 0 1px var(--line);
+  }
+  .axis input[type="range"]::-moz-range-track { height: 3px; border-radius: 2px; background: var(--line); }
+  .axis input[type="range"]::-moz-range-thumb {
+    width: 14px; height: 14px; border: 2px solid var(--surface); border-radius: 50%; background: var(--accent);
+  }
+  .axis input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 3px; }
+  .desc { margin: 12px 0 0; font-size: 12.5px; color: var(--ink-dim); }
+
+  /* ---- two-panel row ---- */
+  .split { display: grid; grid-template-columns: minmax(300px, 0.85fr) 1.15fr; gap: 22px; align-items: start; }
+  @media (max-width: 860px) { .split { grid-template-columns: 1fr; } }
+
+  /* ---- parameter surface ---- */
+  .surface { padding: 14px 18px 10px; overflow-x: auto; }
+  .srow { display: grid; grid-template-columns: 42px repeat(4, minmax(52px, 1fr)); gap: 4px; margin-bottom: 4px; }
+  .corner, .chead, .rhead { font-size: 10.5px; color: var(--ink-faint); display: flex; align-items: center; justify-content: center; }
+  .corner { justify-content: flex-start; }
+  .rhead { justify-content: flex-end; padding-right: 6px; }
+  .cell {
+    appearance: none; border: 1px solid var(--line-soft); border-radius: 4px; padding: 9px 2px;
+    cursor: pointer; color: var(--ink); font: 500 11px/1 "IBM Plex Mono", monospace;
+    font-variant-numeric: tabular-nums; transition: border-color .12s;
+  }
+  .cell:hover { border-color: var(--ink-faint); }
+  .cell.sel { border-color: var(--accent); border-width: 2px; padding: 8px 1px; }
+  .cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .slegend { margin: 10px 0 2px; font-size: 11.5px; color: var(--ink-faint); }
+
+  /* stats sit in one column inside the split */
+  .split .stats { grid-template-columns: 1fr; }
+  .split .group { border-right: 0; border-bottom: 1px solid var(--line-soft); }
+  .split .group:last-child { border-bottom: 0; }
+
+
+  /* ---- live controls ---- */
+  .num { width: 92px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px;
+    background: var(--sunken); color: var(--ink); font: 500 14px/1 "IBM Plex Mono", monospace;
+    font-variant-numeric: tabular-nums; }
+  .num:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .axis.live { grid-template-areas: "k v" "s s"; }
+  .status { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--ink-dim); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gain); flex: none; }
+  .dot.busy { background: var(--accent); animation: pulse .9s ease-in-out infinite; }
+  .dot.err { background: var(--loss); }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+  @media (prefers-reduced-motion: reduce) { .dot.busy { animation: none } }
+  .err-msg { color: var(--loss); font-size: 12.5px; }
+  .run-btn { appearance: none; border: 1px solid var(--accent); background: var(--accent-soft);
+    color: var(--accent); font: 600 13px/1 "IBM Plex Sans", sans-serif; padding: 10px 18px;
+    border-radius: 6px; cursor: pointer; }
+  .run-btn:hover { background: var(--accent); color: var(--surface); }
+  .run-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+  :root { --realized: #237660; --unrealized: #5a62bd; }
+  :root[data-theme="dark"] { --realized: #69c6ab; --unrealized: #a5adff; }
+  .shell { max-width: 1280px; gap: 20px; }
+  h1 { font-size: 26px; letter-spacing: -.035em; }
+  h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .eyebrow { font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--ink-faint); }
+  .header-actions, .control-hd, .control-footer, .result-heading, .chart-toolbar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .header-actions { gap: 8px; }
+  .control-hd, .result-heading, .chart-toolbar { justify-content: space-between; }
+  .control-hd { margin-bottom: 22px; }
+  .control-footer { margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--line-soft); }
+  .control-footer .status { margin-left: auto; }
+  .auto { font-size: 12px; color: var(--ink-dim); display: flex; align-items: center; gap: 5px; }
+  input { accent-color: var(--accent); }
+  .data-control { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+  .unit { color: var(--ink-dim); font-size: 11px; }
+  .axis .k .unit { color: var(--ink-dim); }
+  .axis .v { font-size: 14px; }
+  .quiet-btn { appearance: none; padding: 6px 10px; border: 1px solid var(--line);
+    border-radius: 5px; background: var(--surface); color: var(--ink-dim);
+    font: 500 12px/1.4 ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
+  .quiet-btn:hover { background: var(--sunken); color: var(--ink); }
+  .quiet-btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button:focus-visible, input:focus-visible, svg:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 3px;
+  }
+  .strip { grid-template-columns: repeat(4, 1fr); }
+  .fig { min-width: 0; }
+  .fig:nth-child(4) { border-right: 0; }
+  .fig:nth-child(-n+4) { border-bottom: 1px solid var(--line-soft); }
+  .fig .v { font-size: 22px; }
+  .fig .n { font-size: 10.5px; }
+  .chart-toolbar { padding: 10px 18px 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 11px; color: var(--ink-dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend [hidden] { display: none; }
+  .legend i { width: 15px; height: 2px; display: inline-block; }
+  .legend i.dashed { border-top: 2px dashed var(--ink-faint); }
+  #chart { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; touch-action: pan-y; }
+  .sample-readout { margin: 0 18px; padding: 11px 0; border-top: 1px solid var(--line-soft);
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px 23px; }
+  .sample-readout > span { display: flex; flex-direction: column; gap: 3px; }
+  .sample-readout small { color: var(--ink-faint); font-size: 10px; }
+  .sample-readout b { font-size: 12px; font-weight: 500; }
+  .sample-readout .sample-quality { display: block; margin-left: auto; font-size: 11px;
+    max-width: 230px; color: var(--ink-dim); }
+  .range-controls { padding: 6px 18px 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .range-controls label { display: grid; grid-template-columns: 1fr auto; font-size: 11px;
+    color: var(--ink-dim); gap: 5px; }
+  .range-controls input { grid-column: 1 / -1; width: 100%; margin: 0; }
+  .quality, .compare-note { margin: 0; padding: 10px 18px 13px; font-size: 11.5px;
+    color: var(--ink-dim); }
+  .warn, .sample-readout .sample-quality.warn { color: var(--accent); }
+  .history-wrap { overflow-x: auto; }
+  .history th { padding: 10px 18px; text-align: left; font-size: 10px; color: var(--ink-faint);
+    text-transform: uppercase; letter-spacing: .05em; font-weight: 500; white-space: nowrap; }
+  .history td { padding: 10px 18px; white-space: nowrap; font-size: 12px; }
+  .history b { font-weight: 500; }
+  .history small { display: block; font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 10px; margin-top: 3px; color: var(--ink-faint); }
+  .history tr.selected { background: var(--accent-soft); }
+  .history .history-actions { display: flex; gap: 6px; }
+  .note { max-width: none; }
+  @media (max-width: 700px) {
+    .shell { padding: 20px 12px 36px; gap: 16px; }
+    h1 { font-size: 23px; }
+    .strip { grid-template-columns: repeat(2, 1fr); }
+    .fig { padding: 12px; }
+    .fig .v { font-size: 19px; }
+    .fig:nth-child(even) { border-right: 0; }
+    .fig:nth-child(-n+6) { border-bottom: 1px solid var(--line-soft); }
+    .control-footer .status { margin-left: 0; order: 3; width: 100%; }
+    .controls { padding: 14px; }
+    .run { padding: 11px 9px; font-size: 11px; }
+    .chart-wrap { overflow-x: auto; }
+    #chart { min-width: 570px; }
+    .panel-hd { align-items: flex-start; flex-direction: column; gap: 4px; }
+    .sample-readout .sample-quality { margin-left: 0; }
+    .stats { grid-template-columns: 1fr; }
+    .stats .group { border-right: 0; border-bottom: 1px solid var(--line-soft); }
+  }
+
+</style>
+
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div class="title">
+      <span class="eyebrow">NautilusTrader / Research</span>
+      <h1>Strategy workbench</h1>
+      <span class="sub">Local backtests · <code id="inst">—</code> · <span id="src">waiting for a run</span></span>
+    </div>
+    <div class="header-actions">
+      <span class="chip">SIM venue</span>
+      <button class="quiet-btn" id="theme" type="button">Dark theme</button>
+    </div>
+  </header>
+
+  <section class="panel controls" aria-label="Strategy configuration">
+    <div class="control-hd">
+      <div class="runs" id="strategies" role="group" aria-label="Strategy"></div>
+      <label class="auto"><input type="checkbox" id="autorun" checked> Run on change</label>
+    </div>
+    <div id="axes" class="axes"></div>
+    <div class="control-footer">
+      <label class="data-control">
+        <span id="barsk">Data length</span>
+        <input class="num" type="number" required id="bars" min="120" max="5000" step="1" value="900">
+        <span class="unit" id="barsu">seconds of quotes</span>
+      </label>
+      <div class="status" role="status" aria-live="polite">
+        <span class="dot" id="dot"></span><span id="status">ready</span>
+      </div>
+      <button class="run-btn" type="button" id="rerun">Run backtest</button>
+    </div>
+    <p class="desc" id="desc"></p>
+    <p class="err-msg" id="err" role="alert" hidden></p>
+  </section>
+
+  <div class="result-heading">
+    <div><span class="eyebrow">Selected result</span><h2 id="result-name">Waiting for a run</h2></div>
+    <div class="header-actions">
+      <button class="quiet-btn" id="export-csv" type="button" disabled>Export CSV</button>
+      <button class="quiet-btn" id="export-json" type="button" disabled>Export JSON</button>
+    </div>
+  </div>
+  <div class="strip" id="strip" aria-label="Full run summary"></div>
+
+  <section class="panel" aria-labelledby="chart-title">
+    <div class="panel-hd">
+      <h2 id="chart-title">Performance over time</h2>
+      <span class="hint" id="cadence">Portfolio snapshots</span>
+    </div>
+    <div class="chart-toolbar">
+      <div class="legend">
+        <span><i style="background:var(--accent)"></i>Equity</span>
+        <span><i style="background:var(--realized)"></i>Realized P&amp;L</span>
+        <span><i style="background:var(--unrealized)"></i>Unrealized P&amp;L</span>
+        <span id="baseline-legend" hidden><i class="dashed"></i>Baseline equity</span>
+      </div>
+      <button class="quiet-btn" id="reset-range" type="button">Reset range</button>
+    </div>
+    <div class="chart-wrap">
+      <svg id="chart" viewBox="0 0 1000 584" preserveAspectRatio="xMidYMid meet"
+        role="img" tabindex="0" aria-label="Equity, realized and unrealized profit and loss, and drawdown. Use the left and right arrow keys to inspect samples."></svg>
+    </div>
+    <div class="sample-readout" id="readout" aria-live="off">No snapshot selected.</div>
+    <div class="range-controls">
+      <label>From <output class="mono" id="range-from-label">—</output>
+        <input id="range-from" type="range" min="0" max="999" value="0" aria-label="Chart range start">
+      </label>
+      <label>To <output class="mono" id="range-to-label">—</output>
+        <input id="range-to" type="range" min="1" max="1000" value="1000" aria-label="Chart range end">
+      </label>
+    </div>
+    <p class="quality" id="quality" role="status"></p>
+  </section>
+
+  <section class="panel" aria-labelledby="history-title">
+    <div class="panel-hd">
+      <h2 id="history-title">Run history</h2>
+      <span class="hint">Last 12 runs in this tab · select to revisit · pin to compare</span>
+    </div>
+    <div class="history-wrap">
+      <table class="history">
+        <thead><tr><th>Run / parameters</th><th>Data</th><th>Net P&amp;L</th>
+          <th>Unrealized</th><th>Max drawdown</th><th>Actions</th></tr></thead>
+        <tbody id="history"></tbody>
+      </table>
+    </div>
+    <p class="compare-note" id="compare-note">Pin a run as a baseline to compare its equity curve.</p>
+  </section>
+
+  <section class="panel">
+    <div class="panel-hd">
+      <h2>Engine statistics</h2>
+      <span class="hint">Full run · daily returns statistics marked †</span>
+    </div>
+    <div class="stats" id="stats"></div>
+  </section>
+  <p class="note" id="note"></p>
+</div>
+<script>
+(() => {
+  'use strict';
+
+  const STRATS = [
+    { id: 'ema_cross', label: 'EMA Cross',
+      description: 'Takes the fast/slow crossover and reverses on the opposite cross.',
+      axes: [
+        { key: 'fast', label: 'Fast period', unit: 'ticks', min: 2, max: 400, def: 10 },
+        { key: 'slow', label: 'Slow period', unit: 'ticks', min: 3, max: 600, def: 30 },
+      ] },
+    { id: 'grid_mm', label: 'Grid Market Maker',
+      description: 'Quotes a symmetric ladder around mid and re-quotes as mid drifts.',
+      axes: [
+        { key: 'levels', label: 'Grid levels', unit: 'per side', min: 1, max: 10, def: 3 },
+        { key: 'step', label: 'Grid step', unit: 'bps', min: 1, max: 50, def: 5 },
+      ] },
+    { id: 'pairs_zscore', label: 'Pairs z-score',
+      description: 'Regresses log EUR/USD on log USD/JPY over the lookback window. '
+        + 'Trades the residual beyond the entry threshold, exits inside ±0.5, and stops '
+        + 'at twice the entry threshold. Leg B is sized by the fitted hedge ratio.',
+      data: { label: 'Quotes used', unit: 'recorded ticks', min: 2000, max: 20000, def: 20000 },
+      axes: [
+        { key: 'lookback', label: 'Lookback', unit: 'samples', min: 60, max: 4000, def: 600 },
+        { key: 'entry', label: 'Entry threshold', unit: 'z × 10', min: 10, max: 50, def: 20 },
+      ] },
+  ];
+  const DEFAULT_DATA = {
+    label: 'Data length', unit: 'seconds of quotes', min: 120, max: 5000, def: 900,
+  };
+  const $ = id => document.getElementById(id);
+  const finite = value => typeof value === 'number' && Number.isFinite(value);
+  const incompleteAt = (run, index) => !finite(run.eq[index]) || !finite(run.un[index])
+    || !finite(run.realized?.[index]);
+  const esc = value => String(value).replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[character]));
+  const number = value => finite(value)
+    ? value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : '—';
+  const signed = value => finite(value)
+    ? (value >= 0 ? '+' : '−') + number(Math.abs(value)) : '—';
+  const tone = value => !finite(value) || value === 0 ? '' : value > 0 ? 'pos' : 'neg';
+  const percent = value => finite(value) ? (value * 100).toFixed(3) + '%' : '—';
+  const clock = seconds => {
+    if (!finite(seconds)) return '—';
+    const ms = Math.round(seconds * 1000);
+    const minutes = Math.floor(ms / 60000);
+    const wholeSeconds = String(Math.floor(ms / 1000) % 60).padStart(2, '0');
+    const fraction = ms % 1000 ? '.' + String(ms % 1000).padStart(3, '0') : '';
+    return `${minutes}:${wholeSeconds}${fraction}`;
+  };
+  const strategy = id => STRATS.find(item => item.id === id);
+  let sIdx = 0;
+  let params = STRATS[0].axes.map(axis => axis.def);
+  let current = null;
+  let pending = null;
+  let baseline = null;
+  let history = [];
+  let nextId = 1;
+  let hoverIndex = 0;
+
+  // Snapshot metrics use starting capital as the first high-water mark
+  function derive(run) {
+    if (!run || !run.t.length) return null;
+    let peak = run.starting_balance;
+    let maxDd = 0;
+    let priced = 0;
+    const dd = run.eq.map(value => {
+      if (!finite(value)) return null;
+      priced++;
+      peak = Math.max(peak, value);
+      const drawdown = peak > 0 ? (value - peak) / peak : null;
+      if (finite(drawdown)) maxDd = Math.max(maxDd, -drawdown);
+      return drawdown;
+    });
+    const last = run.eq.at(-1);
+    const net = finite(last) ? last - run.starting_balance : null;
+    const validUnrealized = run.un.filter(finite);
+    return {
+      last, net, dd,
+      maxDd: priced ? maxDd : null,
+      netPct: finite(net) && run.starting_balance > 0 ? net / run.starting_balance : null,
+      lastUn: run.un.at(-1),
+      lastRealized: run.realized?.at(-1),
+      highestUn: validUnrealized.length ? Math.max(...validUnrealized) : null,
+      lowestUn: validUnrealized.length ? Math.min(...validUnrealized) : null,
+      missing: run.eq.length - priced,
+      incomplete: run.t.filter((_, index) => incompleteAt(run, index)).length,
+      carried: (run.stale || []).filter((stale, index) => stale && !incompleteAt(run, index)).length,
+      span: run.t.at(-1) - run.t[0],
+    };
+  }
+
+  function runLabel(entry) {
+    const run = entry.run;
+    const config = strategy(run.strategy);
+    const label = config ? config.label : run.strategy;
+    return `#${entry.id} ${label} · ${run.params.join(' / ')}`;
+  }
+
+  function controls(barsValue) {
+    const config = STRATS[sIdx];
+    [...$('strategies').children].forEach((button, index) => {
+      button.setAttribute('aria-pressed', String(index === sIdx));
+    });
+    $('axes').innerHTML = config.axes.map((axis, index) => `
+      <div class="axis">
+        <label class="k" for="axis-number-${index}">${axis.label}
+          <span class="unit">${axis.unit}</span></label>
+        <input class="num v" id="axis-number-${index}" type="number" required min="${axis.min}"
+          max="${axis.max}" step="1" value="${params[index]}" data-axis="${index}">
+        <input type="range" min="${axis.min}" max="${axis.max}" step="1"
+          value="${params[index]}" data-slider="${index}" aria-label="${axis.label}">
+      </div>`).join('');
+    $('axes').querySelectorAll('input').forEach(input => {
+      const index = Number(input.dataset.axis ?? input.dataset.slider);
+      input.addEventListener('input', () => {
+        params[index] = Number(input.value);
+        const partner = input.type === 'range'
+          ? $(`axis-number-${index}`)
+          : $('axes').querySelector(`[data-slider="${index}"]`);
+        partner.value = input.value;
+        edited();
+      });
+      input.addEventListener('change', maybeRequest);
+    });
+    const data = config.data || DEFAULT_DATA;
+    $('barsk').textContent = data.label;
+    $('barsu').textContent = data.unit;
+    Object.assign($('bars'), { min: data.min, max: data.max, value: barsValue ?? data.def });
+    $('desc').textContent = config.description;
+  }
+
+  function edited() {
+    $('status').textContent = 'Parameters changed · run to update the result';
+  }
+
+  function maybeRequest() {
+    if ($('autorun').checked) request();
+  }
+
+  STRATS.forEach((config, index) => {
+    const button = document.createElement('button');
+    button.className = 'run';
+    button.type = 'button';
+    button.textContent = config.label;
+    button.addEventListener('click', () => {
+      sIdx = index;
+      params = config.axes.map(axis => axis.def);
+      controls();
+      edited();
+      maybeRequest();
+    });
+    $('strategies').appendChild(button);
+  });
+
+  async function request() {
+    const config = STRATS[sIdx];
+    const bars = Number($('bars').value);
+    const inputs = [...$('axes').querySelectorAll('input[type=number]'), $('bars')];
+    if (inputs.some(input => !input.reportValidity())) return;
+    if (config.id === 'ema_cross' && params[1] <= params[0]) {
+      $('err').hidden = false;
+      $('err').textContent = 'Slow period must exceed fast period.';
+      return;
+    }
+    if (pending) pending.abort();
+    const controller = new AbortController();
+    pending = controller;
+    $('dot').className = 'dot busy';
+    $('status').textContent = 'Running backtest…';
+    $('err').hidden = true;
+    $('rerun').setAttribute('aria-busy', 'true');
+    const query = new URLSearchParams({
+      strategy: config.id, p0: params[0], p1: params[1], bars,
+    });
+    try {
+      const response = await fetch(`/api/run?${query}`, { signal: controller.signal });
+      const run = await response.json();
+      if (!response.ok || run.error) throw new Error(run.error || response.statusText);
+      if (controller !== pending) return;
+      if (!Array.isArray(run.t) || !Array.isArray(run.eq) || !Array.isArray(run.un)
+        || run.t.length !== run.eq.length || run.t.length !== run.un.length) {
+        throw new Error('The server returned an invalid snapshot series.');
+      }
+      current = { id: nextId++, run, bars, completed: new Date().toISOString() };
+      hoverIndex = run.t.length - 1;
+      history.unshift(current);
+      history = history.slice(0, 12);
+      resetRange();
+      $('dot').className = 'dot';
+      $('status').textContent = `Completed in ${run.elapsed_ms} ms · ${run.t.length} snapshots`;
+      paint();
+    } catch (e) {
+      if (e.name === 'AbortError' || controller !== pending) return;
+      $('dot').className = 'dot err';
+      $('status').textContent = 'Run failed · previous result retained';
+      $('err').hidden = false;
+      $('err').textContent = e.message;
+    } finally {
+      if (pending === controller) {
+        pending = null;
+        $('rerun').removeAttribute('aria-busy');
+      }
+    }
+  }
+  $('rerun').addEventListener('click', request);
+  $('bars').addEventListener('input', edited);
+  $('bars').addEventListener('change', maybeRequest);
+
+  function strip(run, derived) {
+    const quality = derived?.missing ? 'observed samples · incomplete' : 'full run';
+    const latestQuality = value => {
+      if (!run || !run.t.length) return 'no snapshot';
+      if (!finite(value)) return 'last snapshot · unavailable';
+      if (incompleteAt(run, run.t.length - 1)) return 'last snapshot · incomplete';
+      return run.stale?.at(-1) ? 'last snapshot · carried estimate' : 'last snapshot';
+    };
+    const cells = [
+      ['Final equity', number(derived?.last),
+        `${run?.currency || 'USD'} · ${latestQuality(derived?.last)}`, ''],
+      ['Net P&L', signed(derived?.net), percent(derived?.netPct), tone(derived?.net)],
+      ['Realized P&L', signed(derived?.lastRealized), latestQuality(derived?.lastRealized),
+        tone(derived?.lastRealized)],
+      ['Unrealized P&L', signed(derived?.lastUn), `open exposure · ${latestQuality(derived?.lastUn)}`,
+        tone(derived?.lastUn)],
+      ['Max drawdown', percent(derived?.maxDd), quality, derived?.maxDd > 0 ? 'neg' : ''],
+      ['Peak floating P&L', signed(derived?.highestUn), 'highest observed unrealized P&L',
+        tone(derived?.highestUn)],
+      ['Trough floating P&L', signed(derived?.lowestUn), 'lowest observed unrealized P&L',
+        tone(derived?.lowestUn)],
+      ['Positions', run ? String(run.total_positions) : '—',
+        `${run?.total_orders ?? 0} orders · full run`, ''],
+    ];
+    $('strip').innerHTML = cells.map(([key, value, note, className]) => `
+      <div class="fig"><span class="k">${key}</span><span class="v ${className}">${value}</span>
+        <span class="n">${esc(note)}</span></div>`).join('');
+  }
+
+  function comparable() {
+    if (!baseline || !current || baseline.id === current.id) return false;
+    return ['currency', 'instrument', 'data_source', 'starting_balance'].every(key =>
+      baseline.run[key] === current.run[key]);
+  }
+
+  // Snapshots are irregular, so lookup follows elapsed time instead of array position
+  function nearest(times, target) {
+    const after = value => {
+      let lo = 0, hi = times.length;
+      while (lo < hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        if (times[mid] <= value) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    };
+    const right = after(target);
+    if (right === times.length) return right - 1;
+    if (right > 0 && target - times[right - 1] <= times[right] - target) return right - 1;
+    return after(times[right]) - 1;
+  }
+
+  function selectedRange(run) {
+    const start = run.t[0];
+    const span = run.t.at(-1) - start;
+    return [start + span * Number($('range-from').value) / 1000,
+      start + span * Number($('range-to').value) / 1000];
+  }
+
+  function resetRange() {
+    $('range-from').value = 0;
+    $('range-to').value = 1000;
+  }
+  $('reset-range').addEventListener('click', () => {
+    resetRange();
+    chart(current?.run, derive(current?.run));
+  });
+  ['range-from', 'range-to'].forEach(id => $(id).addEventListener('input', () => {
+    if (Number($('range-from').value) >= Number($('range-to').value)) {
+      if (id === 'range-from') $('range-to').value = Number($('range-from').value) + 1;
+      else $('range-from').value = Number($('range-to').value) - 1;
+    }
+    chart(current?.run, derive(current?.run));
+  }));
+
+  const W = 1000, L = 91, R = 20;
+  const PANELS = [
+    { top: 28, bottom: 234, label: 'EQUITY' },
+    { top: 280, bottom: 422, label: 'REALIZED / UNREALIZED P&L' },
+    { top: 465, bottom: 546, label: 'DRAWDOWN FROM RUN HIGH' },
+  ];
+
+  function chart(run, derived) {
+    const svg = $('chart');
+    svg.onpointermove = null;
+    svg.onkeydown = null;
+    $('baseline-legend').hidden = !comparable();
+    if (!derived) {
+      svg.innerHTML = `<text x="500" y="275" text-anchor="middle" fill="var(--ink-dim)"
+        font-size="15">No portfolio snapshots are available for this run.</text>`;
+      $('readout').textContent = 'No snapshot selected.';
+      $('range-from-label').textContent = '—';
+      $('range-to-label').textContent = '—';
+      return;
+    }
+    const [from, to] = selectedRange(run);
+    const span = to - from || 1;
+    $('range-from-label').textContent = clock(from);
+    $('range-to-label').textContent = clock(to);
+    const x = time => L + (time - from) / span * (W - L - R);
+    const visible = values => values.filter((value, index) =>
+      finite(value) && run.t[index] >= from && run.t[index] <= to);
+    const equityValues = [run.starting_balance, ...visible(run.eq)];
+    if (comparable()) baseline.run.eq.forEach((value, index) => {
+      if (finite(value) && baseline.run.t[index] >= from && baseline.run.t[index] <= to) {
+        equityValues.push(value);
+      }
+    });
+    const pnlValues = [0, ...visible(run.un), ...visible(run.realized || [])];
+    const limits = [equityValues, pnlValues].map(values => {
+      const lo = Math.min(...values), hi = Math.max(...values);
+      const pad = (hi - lo) * 0.12 || 1;
+      return [lo - pad, hi + pad];
+    });
+    const localDrawdowns = visible(derived.dd);
+    limits.push([-Math.max(0.0001, ...localDrawdowns.map(value => -value)), 0]);
+    const y = (panel, value) => PANELS[panel].bottom
+      - (value - limits[panel][0]) / (limits[panel][1] - limits[panel][0])
+        * (PANELS[panel].bottom - PANELS[panel].top);
+    const parts = ['<defs>'];
+    PANELS.forEach((panel, index) => parts.push(`<clipPath id="clip-${index}">
+      <rect x="${L}" y="${panel.top}" width="${W - L - R}"
+        height="${panel.bottom - panel.top}"/></clipPath>`));
+    parts.push('</defs>');
+    PANELS.forEach((panel, index) => {
+      parts.push(`<text x="${L}" y="${panel.top - 12}" fill="var(--ink-dim)"
+        font-size="10" letter-spacing="1">${panel.label} · ${index < 2 ? esc(run.currency) : '%'}</text>`);
+      const divisions = index === 0 ? 4 : 2;
+      for (let tick = 0; tick <= divisions; tick++) {
+        const value = limits[index][0]
+          + (limits[index][1] - limits[index][0]) * tick / divisions;
+        const yy = y(index, value);
+        const label = index === 2 ? (value * 100).toFixed(3) + '%'
+          : value.toLocaleString('en-US', { maximumFractionDigits: 1 });
+        parts.push(`<line x1="${L}" y1="${yy}" x2="${W - R}" y2="${yy}"
+          stroke="var(--grid)"/><text x="${L - 10}" y="${yy + 4}" text-anchor="end"
+          fill="var(--ink-faint)" font-size="10">${label}</text>`);
+      }
+    });
+    function path(values, times, panel, color, dashed = false) {
+      let line = '';
+      let connected = false;
+      values.forEach((value, index) => {
+        if (!finite(value) || !finite(times[index])) { connected = false; return; }
+        line += `${connected ? 'L' : 'M'}${x(times[index]).toFixed(2)} ${y(panel, value).toFixed(2)} `;
+        connected = true;
+      });
+      parts.push(`<path d="${line}" clip-path="url(#clip-${panel})" fill="none"
+        stroke="${color}" stroke-width="${dashed ? 1.5 : 1.8}" stroke-linejoin="round"
+        ${dashed ? 'stroke-dasharray="5 4"' : ''}/>`);
+      values.forEach((value, index) => {
+        if (finite(value) && !finite(values[index - 1]) && !finite(values[index + 1])) {
+          parts.push(`<circle cx="${x(times[index])}" cy="${y(panel, value)}" r="2.5"
+            fill="${color}" clip-path="url(#clip-${panel})"/>`);
+        }
+      });
+    }
+    [run.starting_balance, 0].forEach((value, panel) => parts.push(
+      `<line x1="${L}" x2="${W - R}" y1="${y(panel, value)}" y2="${y(panel, value)}"
+        stroke="var(--ink-faint)" stroke-dasharray="3 4" opacity=".6"/>`,
+    ));
+    if (comparable()) path(baseline.run.eq, baseline.run.t, 0, 'var(--ink-faint)', true);
+    path(run.eq, run.t, 0, 'var(--accent)');
+    path(run.realized || [], run.t, 1, 'var(--realized)');
+    path(run.un, run.t, 1, 'var(--unrealized)');
+    path(derived.dd, run.t, 2, 'var(--loss)');
+    [0, 0.25, 0.5, 0.75, 1].forEach(fraction => {
+      const time = from + (to - from) * fraction;
+      parts.push(`<text x="${x(time)}" y="572" fill="var(--ink-faint)" font-size="10"
+        text-anchor="${fraction === 0 ? 'start' : fraction === 1 ? 'end' : 'middle'}">
+        ${clock(time)}</text>`);
+    });
+    parts.push(`<line id="cross" y1="${PANELS[0].top}" y2="${PANELS[2].bottom}"
+      stroke="var(--ink-faint)" stroke-dasharray="2 3" opacity=".65"/>`);
+    svg.innerHTML = parts.join('');
+    function inspect(index) {
+      hoverIndex = index;
+      const time = run.t[index];
+      const cross = $('cross');
+      cross.setAttribute('x1', x(time));
+      cross.setAttribute('x2', x(time));
+      cross.style.display = time >= from && time <= to ? '' : 'none';
+      const unpriced = run.unpriced?.[index] || [];
+      const unavailable = incompleteAt(run, index);
+      const missingMarks = unpriced.length ? ' · missing marks: ' + unpriced.join(', ') : '';
+      const status = unavailable ? 'Valuation unavailable' + missingMarks
+        : run.stale?.[index] ? 'Carried valuation' + missingMarks : 'Priced';
+      const values = [
+        ['Elapsed', clock(time)], ['Equity', number(run.eq[index])],
+        ['Realized', signed(run.realized?.[index])], ['Unrealized', signed(run.un[index])],
+        ['Drawdown', percent(derived.dd[index])],
+      ];
+      $('readout').innerHTML = values.map(([label, value]) =>
+        `<span><small>${label}</small><b class="mono">${value}</b></span>`).join('')
+        + `<span class="sample-quality ${unpriced.length || run.stale?.[index] || unavailable ? 'warn' : ''}"
+            title="${esc(run.ts_ns?.[index] || '')}">${esc(status)}</span>`;
+    }
+    const firstVisible = run.t.findIndex(time => time >= from);
+    const lastVisible = run.t.findLastIndex(time => time <= to);
+    const initial = lastVisible >= firstVisible && firstVisible >= 0
+      ? Math.max(firstVisible, Math.min(lastVisible, hoverIndex)) : nearest(run.t, to);
+    inspect(initial);
+    svg.onpointermove = event => {
+      const point = svg.createSVGPoint();
+      point.x = event.clientX;
+      point.y = event.clientY;
+      const position = point.matrixTransform(svg.getScreenCTM().inverse());
+      if (position.x < L || position.x > W - R) return;
+      const target = from + (position.x - L) / (W - L - R) * span;
+      inspect(nearest(run.t, target));
+    };
+    svg.onkeydown = event => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const lo = firstVisible < 0 ? run.t.length - 1 : firstVisible;
+      const hi = Math.max(lo, lastVisible);
+      const next = event.key === 'Home' ? lo : event.key === 'End' ? hi
+        : hoverIndex + (event.key === 'ArrowRight' ? 1 : -1);
+      inspect(Math.max(lo, Math.min(hi, next)));
+    };
+  }
+
+  const DAILY = new Set(['Max Drawdown', 'Max Drawdown Duration (days)',
+    'Max Drawdown Recovery (days)', 'Sharpe Ratio (252 days)', 'Sortino Ratio (252 days)',
+    'Returns Volatility (252 days)', 'Calmar Ratio (252 days)', 'CAGR (252 days)', 'Ulcer Index']);
+  const formatStat = value => value == null ? '—' : typeof value !== 'number' ? esc(value)
+    : !finite(value) ? '—' : Math.abs(value) < 1 ? value.toFixed(4) : number(value);
+
+  function stats(run) {
+    if (!run) { $('stats').innerHTML = ''; return; }
+    const groups = [['P&L · ' + run.currency, run.stats_pnls?.[run.currency] || {}],
+      ['Returns', run.stats_returns || {}], ['General', run.stats_general || {}]];
+    $('stats').innerHTML = groups.map(([name, values]) => {
+      const rows = Object.keys(values).sort().map(key => `<tr><td class="k">${esc(key)}
+        ${DAILY.has(key) ? '<span class="flag" title="Computed from daily returns">†</span>' : ''}
+        </td><td class="v">${formatStat(values[key])}</td></tr>`).join('');
+      return `<div class="group"><h3>${esc(name)}</h3><table>
+        ${rows || '<tr><td class="k nan">No statistics</td></tr>'}</table></div>`;
+    }).join('');
+  }
+
+  function historyTable() {
+    $('history').innerHTML = history.map(entry => {
+      const run = entry.run, derived = derive(run);
+      const selected = entry.id === current?.id;
+      return `<tr class="${selected ? 'selected' : ''}">
+        <td><b>${esc(runLabel(entry))}</b><small>${esc(run.instrument)}
+          ${selected ? ' · selected' : ''}</small></td>
+        <td>${run.quotes.toLocaleString('en-US')} quotes<small>${esc(run.data_source)}</small></td>
+        <td class="v ${tone(derived?.net)}">${signed(derived?.net)}
+          <small>${esc(run.currency)}</small></td>
+        <td class="v ${tone(derived?.lastUn)}">${signed(derived?.lastUn)}</td>
+        <td class="v">${percent(derived?.maxDd)}${derived?.missing ? '*' : ''}</td>
+        <td class="history-actions"><button class="quiet-btn" data-view="${entry.id}"
+          ${selected ? 'disabled' : ''}>View</button>
+          <button class="quiet-btn" data-pin="${entry.id}"
+            aria-pressed="${baseline?.id === entry.id}">
+            ${baseline?.id === entry.id ? 'Unpin' : 'Pin'}</button></td></tr>`;
+    }).join('') || '<tr><td colspan="6">Completed runs appear here.</td></tr>';
+    $('history').querySelectorAll('[data-view]').forEach(button => {
+      button.addEventListener('click', () => {
+        if (pending) { pending.abort(); pending = null; }
+        current = history.find(entry => entry.id === Number(button.dataset.view));
+        sIdx = STRATS.findIndex(config => config.id === current.run.strategy);
+        params = [...current.run.params];
+        hoverIndex = current.run.t.length - 1;
+        controls(current.bars);
+        resetRange();
+        $('dot').className = 'dot';
+        $('status').textContent = `Viewing saved run #${current.id}`;
+        $('rerun').removeAttribute('aria-busy');
+        $('err').hidden = true;
+        paint();
+      });
+    });
+    $('history').querySelectorAll('[data-pin]').forEach(button => {
+      button.addEventListener('click', () => {
+        const id = Number(button.dataset.pin);
+        baseline = baseline?.id === id ? null : history.find(entry => entry.id === id);
+        paint();
+      });
+    });
+    $('compare-note').textContent = !baseline
+      ? 'Pin a run as a baseline to compare its equity curve.'
+      : baseline.id === current?.id ? `${runLabel(baseline)} is pinned. Run another configuration to compare.`
+      : comparable() ? `Baseline: ${runLabel(baseline)}. Curves share elapsed time; data lengths may differ.`
+      : `Baseline: ${runLabel(baseline)}. Select the same instrument, source, currency and starting capital to overlay.`;
+  }
+
+  function paint() {
+    const run = current?.run, derived = derive(run);
+    $('inst').textContent = run?.instrument || '—';
+    $('src').textContent = run ? `${run.data_source} · ${run.quotes.toLocaleString('en-US')} quotes` : '—';
+    $('result-name').textContent = current ? runLabel(current) : 'Waiting for a run';
+    $('cadence').textContent = run
+      ? `${run.t.length.toLocaleString('en-US')} samples · ${run.sampling_interval_ms ?? 1000} ms cadence + events`
+      : 'Portfolio snapshots';
+    strip(run, derived);
+    chart(run, derived);
+    stats(run);
+    historyTable();
+    $('export-csv').disabled = !run;
+    $('export-json').disabled = !run;
+    if (derived) {
+      const issues = [];
+      if (derived.incomplete) issues.push(`${derived.incomplete} incomplete valuations`);
+      if (derived.missing) issues.push(`${derived.missing} equity snapshots unavailable`);
+      if (derived.carried) issues.push(`${derived.carried} carried valuations`);
+      $('quality').classList.toggle('warn', issues.length > 0);
+      $('quality').textContent = issues.length
+        ? issues.join(' · ') + '. Missing values remain gaps. Drawdown and floating extrema use observed values; carried marks are estimates.'
+        : 'All equity and P&L snapshots priced. Hover or use arrow keys to inspect. Range controls zoom the chart; summary figures cover the full run.';
+    } else {
+      $('quality').classList.remove('warn');
+      $('quality').textContent = 'No snapshots recorded. Missing equity and P&L are shown as unavailable.';
+    }
+    const pairs = run?.strategy === 'pairs_zscore'
+      ? ' The pairs example uses a historical session and does not establish that the pair is cointegrated.' : '';
+    $('note').textContent = 'Unrealized P&L marks open exposure; realized P&L comes from the portfolio. '
+      + 'Net P&L is equity minus starting capital and can also include cash flows and fees. '
+      + 'Drawdown above uses portfolio snapshots, while † statistics use daily returns and may be '
+      + 'unavailable or differ in short runs. Position counts are not fill counts.' + pairs;
+  }
+
+  function download(format) {
+    if (!current) return;
+    const run = current.run;
+    let content, mime;
+    if (format === 'json') {
+      content = JSON.stringify({ ...run, workbench: {
+        requested_bars: current.bars, completed_at: current.completed,
+      } }, null, 2);
+      mime = 'application/json';
+    } else {
+      const csvCell = value => value == null ? '' : '"' + String(value).replace(/"/g, '""') + '"';
+      const header = ['timestamp_ns', 'elapsed_seconds', 'currency', 'equity', 'realized_pnl',
+        'unrealized_pnl', 'equity_exact', 'realized_exact', 'unrealized_exact',
+        'valuation_stale', 'unpriced_instruments'];
+      const rows = run.t.map((time, index) => [run.ts_ns?.[index], time, run.currency,
+        run.eq[index], run.realized?.[index], run.un[index], run.equity_exact?.[index],
+        run.realized_exact?.[index], run.unrealized_exact?.[index], run.stale?.[index] ?? '',
+        (run.unpriced?.[index] || []).join(';')]);
+      content = [header, ...rows].map(row => row.map(csvCell).join(',')).join('\r\n');
+      mime = 'text/csv;charset=utf-8';
+    }
+    const url = URL.createObjectURL(new Blob([content], { type: mime }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `nautilus-${run.strategy}-${run.params.join('-')}-run-${current.id}.${format}`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  $('export-csv').addEventListener('click', () => download('csv'));
+  $('export-json').addEventListener('click', () => download('json'));
+  const preferredDark = matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.dataset.theme = preferredDark ? 'dark' : 'light';
+  function themeLabel() {
+    $('theme').textContent = document.documentElement.dataset.theme === 'dark'
+      ? 'Light theme' : 'Dark theme';
+  }
+  $('theme').addEventListener('click', () => {
+    document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark'
+      ? 'light' : 'dark';
+    themeLabel();
+  });
+  themeLabel();
+  controls();
+  paint();
+  request();
+})();
+</script>
+</body>
+</html>

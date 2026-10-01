@@ -111,6 +111,24 @@ harness = false
 
 # Run with `cargo run -p nautilus-backtest --features examples --example engine-ema-cross`
 [[example]]
+name = "workbench-serve"
+path = "examples/workbench_serve.rs"
+required-features = ["examples", "high-precision"]
+doc = false
+
+[[example]]
+name = "workbench-export"
+path = "examples/workbench_export.rs"
+required-features = ["examples"]
+doc = false
+
+[[example]]
+name = "pairs-zscore-fx"
+path = "examples/pairs_zscore_fx.rs"
+required-features = ["examples", "high-precision"]
+doc = false
+
+[[example]]
 name = "engine-ema-cross"
 path = "examples/engine_ema_cross.rs"
 required-features = ["examples"]

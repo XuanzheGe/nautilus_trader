@@ -22,6 +22,7 @@
 
 pub mod analyzer;
 pub mod snapshot;
+pub mod statistic_adapter;
 pub mod statistics;
 
 use pyo3::{prelude::*, pymodule};
@@ -42,6 +43,8 @@ pub fn analysis(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::statistics::cagr::CAGR>()?;
     m.add_class::<crate::statistics::calmar_ratio::CalmarRatio>()?;
     m.add_class::<crate::statistics::max_drawdown::MaxDrawdown>()?;
+    m.add_class::<crate::statistics::max_drawdown_duration::MaxDrawdownDuration>()?;
+    m.add_class::<crate::statistics::max_drawdown_recovery::MaxDrawdownRecovery>()?;
     m.add_class::<crate::statistics::profit_factor::ProfitFactor>()?;
     m.add_class::<crate::statistics::returns_avg::ReturnsAverage>()?;
     m.add_class::<crate::statistics::returns_avg_loss::ReturnsAverageLoss>()?;

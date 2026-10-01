@@ -19,36 +19,27 @@ use nautilus_model::position::Position;
 use pyo3::prelude::*;
 
 use super::transform_returns;
-use crate::{statistic::PortfolioStatistic, statistics::sortino_ratio::SortinoRatio};
+use crate::{statistic::PortfolioStatistic, statistics::max_drawdown_duration::MaxDrawdownDuration};
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
-impl SortinoRatio {
-    /// Calculates the Sortino ratio for portfolio returns.
+impl MaxDrawdownDuration {
+    /// The longest time spent below a prior equity peak, in days.
     ///
-    /// The Sortino ratio is a variation of the Sharpe ratio that only penalizes downside
-    /// volatility, making it more appropriate for strategies with asymmetric return distributions.
+    /// Depth alone does not describe a drawdown: a shallow decline that lasts a year is a different
+    /// risk from a sharp one that recovers in a week. This measures the longest single underwater
+    /// stretch, from the peak that started it to the point the peak was regained.
     ///
-    /// Formula: `Mean Return / Downside Deviation * sqrt(period)`
-    ///
-    /// Where downside deviation is calculated as:
-    /// `sqrt(sum(negative_returns^2) / total_observations)`
-    ///
-    /// Note: Uses total observations count (not just negative returns) as per Sortino's methodology.
+    /// An episode that is still underwater at the end of the series is measured up to the final
+    /// observation, so the result is a lower bound in that case.
     ///
     /// # References
     ///
-    /// - Sortino, F. A., & van der Meer, R. (1991). "Downside Risk". *Journal of Portfolio Management*, 17(4), 27-31.
-    /// - Sortino, F. A., & Price, L. N. (1994). "Performance Measurement in a Downside Risk Framework".
-    ///   *Journal of Investing*, 3(3), 59-64.
+    /// - Bacon, C. R. (2008). *Practical Portfolio Performance Measurement and Attribution*
+    ///   (2nd ed.). Wiley.
     #[new]
-    #[pyo3(signature = (period=None, risk_free_rate=None))]
-    fn py_new(period: Option<usize>, risk_free_rate: Option<f64>) -> Self {
-        Self::new(period, risk_free_rate)
-    }
-
-    fn __repr__(&self) -> String {
-        self.to_string()
+    fn py_new() -> Self {
+        Self::new()
     }
 
     #[getter]
@@ -59,17 +50,21 @@ impl SortinoRatio {
 
     #[pyo3(name = "calculate_from_returns")]
     #[expect(clippy::needless_pass_by_value)]
-    fn py_calculate_from_returns(&mut self, raw_returns: BTreeMap<u64, f64>) -> Option<f64> {
+    fn py_calculate_from_returns(&self, raw_returns: BTreeMap<u64, f64>) -> Option<f64> {
         self.calculate_from_returns(&transform_returns(&raw_returns))
     }
 
     #[pyo3(name = "calculate_from_realized_pnls")]
-    fn py_calculate_from_realized_pnls(&mut self, _realized_pnls: Vec<f64>) -> Option<f64> {
+    fn py_calculate_from_realized_pnls(&self, _realized_pnls: Vec<f64>) -> Option<f64> {
         None
     }
 
     #[pyo3(name = "calculate_from_positions")]
-    fn py_calculate_from_positions(&mut self, _positions: Vec<Position>) -> Option<f64> {
+    fn py_calculate_from_positions(&self, _positions: Vec<Position>) -> Option<f64> {
         None
+    }
+
+    fn __repr__(&self) -> String {
+        format!("MaxDrawdownDuration({})", self.name())
     }
 }

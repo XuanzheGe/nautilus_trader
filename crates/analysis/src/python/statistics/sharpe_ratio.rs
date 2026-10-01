@@ -29,8 +29,9 @@ impl SharpeRatio {
     /// The Sharpe ratio measures risk-adjusted return and is calculated as:
     /// `(Mean Return - Risk-free Rate) / Standard Deviation of Returns * sqrt(period)`
     ///
-    /// This implementation assumes a risk-free rate of 0 and annualizes the ratio
-    /// using the square root of the specified period (default: 252 trading days).
+    /// The per-period risk-free rate defaults to 0, and the ratio is annualized using the square root
+    /// of the specified period (default: 252 trading days). When a non-zero rate is set the statistic
+    /// renames itself so the two variants cannot collide in the produced statistics map.
     ///
     /// # References
     ///
@@ -38,9 +39,9 @@ impl SharpeRatio {
     /// - Sharpe, W. F. (1994). "The Sharpe Ratio". *Journal of Portfolio Management*, 21(1), 49-58.
     /// - CFA Institute Investment Foundations, 3rd Edition
     #[new]
-    #[pyo3(signature = (period=None))]
-    fn py_new(period: Option<usize>) -> Self {
-        Self::new(period)
+    #[pyo3(signature = (period=None, risk_free_rate=None))]
+    fn py_new(period: Option<usize>, risk_free_rate: Option<f64>) -> Self {
+        Self::new(period, risk_free_rate)
     }
 
     fn __repr__(&self) -> String {

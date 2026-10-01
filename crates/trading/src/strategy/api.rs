@@ -26,7 +26,8 @@ use nautilus_model::{
     enums::{ContingencyType, OrderSide, OrderType, TimeInForce, TrailingOffsetType, TriggerType},
     events::PortfolioSnapshot,
     identifiers::{
-        AccountId, ClientOrderId, ExecAlgorithmId, InstrumentId, OrderListId, PositionId, Venue,
+        AccountId, ClientOrderId, ExecAlgorithmId, InstrumentId, OrderListId, PositionId,
+        StrategyId, Venue,
     },
     orders::{OrderAny, OrderList},
     types::{Currency, Money, Price, Quantity},
@@ -676,6 +677,51 @@ impl<'a> PortfolioApi<'a> {
             .unrealized_pnls(venue, account_id, None)
     }
 
+    /// Returns the unrealized PnLs for the open positions of the given strategy.
+    ///
+    /// Pass `None` for `venue` to span every venue on which the strategy holds open positions.
+    ///
+    /// Unlike [`PortfolioApi::unrealized_pnls`], which reports the trader-wide figure, this scopes
+    /// the calculation to positions carrying `strategy_id`. See
+    /// [`Portfolio::unrealized_pnls_for_strategy`] for the attribution caveats.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the portfolio is already mutably borrowed.
+    #[must_use]
+    pub fn unrealized_pnls_for_strategy(
+        &self,
+        strategy_id: &StrategyId,
+        venue: Option<&Venue>,
+    ) -> Option<IndexMap<Currency, Money>> {
+        self.portfolio
+            .borrow()
+            .unrealized_pnls_for_strategy(strategy_id, venue, None)
+    }
+
+    /// Returns the realized PnLs accumulated by the given strategy.
+    ///
+    /// Pass `None` for `venue` to span every venue the strategy has traded on. Covers open and
+    /// closed positions, so a strategy that is currently flat still reports its accumulated PnL.
+    ///
+    /// Unlike [`PortfolioApi::realized_pnls`], which reports the trader-wide figure, this scopes
+    /// the calculation to positions carrying `strategy_id`. See
+    /// [`Portfolio::realized_pnls_for_strategy`] for the attribution caveats.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the portfolio is already mutably borrowed.
+    #[must_use]
+    pub fn realized_pnls_for_strategy(
+        &self,
+        strategy_id: &StrategyId,
+        venue: Option<&Venue>,
+    ) -> Option<IndexMap<Currency, Money>> {
+        self.portfolio
+            .borrow()
+            .realized_pnls_for_strategy(strategy_id, venue, None)
+    }
+
     /// Returns the realized PnLs for all positions at the given venue.
     ///
     /// # Panics
@@ -1070,6 +1116,14 @@ mod tests {
         assert!(api.instrument_initial_margins(&venue).is_empty());
         assert!(api.instrument_maintenance_margins(&venue).is_empty());
         assert_eq!(api.unrealized_pnls(&venue, None), Some(IndexMap::new()));
+        assert_eq!(
+            api.unrealized_pnls_for_strategy(&StrategyId::from("S-001"), Some(&venue)),
+            Some(IndexMap::new())
+        );
+        assert_eq!(
+            api.unrealized_pnls_for_strategy(&StrategyId::from("S-001"), None),
+            Some(IndexMap::new())
+        );
         assert_eq!(api.realized_pnls(&venue, None), Some(IndexMap::new()));
         assert_eq!(api.net_exposures(&venue, None), None);
         assert_eq!(api.unrealized_pnl(&instrument_id), None);

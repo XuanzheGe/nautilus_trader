@@ -2233,7 +2233,9 @@ fn log_portfolio_performance(analyzer: &PortfolioAnalyzer) {
         log::info!(" PnL Statistics ({})", currency.code);
         log_info!("-----------------------------------------------------------------", color = LogColor::Cyan);
 
-        if let Ok(pnl_lines) = analyzer.get_stats_pnls_formatted(Some(currency), None) {
+        if let Ok(pnl_lines) =
+            analyzer.get_stats_pnls_formatted(Some(currency), analyzer.unrealized_pnl_for(currency))
+        {
             for line in &pnl_lines {
                 log::info!("{line}");
             }

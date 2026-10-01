@@ -24,8 +24,9 @@ use crate::{Returns, statistic::PortfolioStatistic};
 /// The Sharpe ratio measures risk-adjusted return and is calculated as:
 /// `(Mean Return - Risk-free Rate) / Standard Deviation of Returns * sqrt(period)`
 ///
-/// This implementation assumes a risk-free rate of 0 and annualizes the ratio
-/// using the square root of the specified period (default: 252 trading days).
+/// The per-period risk-free rate defaults to 0, and the ratio is annualized using the square root
+/// of the specified period (default: 252 trading days). When a non-zero rate is set the statistic
+/// renames itself so the two variants cannot collide in the produced statistics map.
 ///
 /// # References
 ///
@@ -45,21 +46,33 @@ use crate::{Returns, statistic::PortfolioStatistic};
 pub struct SharpeRatio {
     /// The annualization period (default: 252 for daily data).
     period: usize,
+    /// The per-period risk-free rate (default: 0.0).
+    risk_free_rate: f64,
 }
 
 impl SharpeRatio {
     /// Creates a new [`SharpeRatio`] instance.
     #[must_use]
-    pub fn new(period: Option<usize>) -> Self {
+    pub fn new(period: Option<usize>, risk_free_rate: Option<f64>) -> Self {
         Self {
             period: period.unwrap_or(252),
+            risk_free_rate: risk_free_rate.unwrap_or(0.0),
         }
     }
 }
 
 impl Display for SharpeRatio {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Sharpe Ratio ({} days)", self.period)
+        if self.risk_free_rate == 0.0 {
+            // Keep the default name stable: it is the key used in the produced statistics map.
+            write!(f, "Sharpe Ratio ({} days)", self.period)
+        } else {
+            write!(
+                f,
+                "Sharpe Ratio ({} days, rf {})",
+                self.period, self.risk_free_rate
+            )
+        }
     }
 }
 
@@ -83,7 +96,8 @@ impl PortfolioStatistic for SharpeRatio {
             return Some(f64::NAN);
         }
 
-        let annualized_ratio = (mean / std) * (self.period as f64).sqrt();
+        let excess = mean - self.risk_free_rate;
+        let annualized_ratio = (excess / std) * (self.period as f64).sqrt();
 
         Some(annualized_ratio)
     }
@@ -120,7 +134,7 @@ mod tests {
 
     #[rstest]
     fn test_empty_returns() {
-        let ratio = SharpeRatio::new(None);
+        let ratio = SharpeRatio::new(None, None);
         let returns = create_returns(&[]);
         let result = ratio.calculate_from_returns(&returns);
         assert!(result.is_some());
@@ -129,16 +143,49 @@ mod tests {
 
     #[rstest]
     fn test_zero_std_dev() {
-        let ratio = SharpeRatio::new(None);
+        let ratio = SharpeRatio::new(None, None);
         let returns = create_returns(&[0.01; 10]);
         let result = ratio.calculate_from_returns(&returns);
         assert!(result.is_some());
         assert!(result.unwrap().is_nan());
     }
 
+    /// A non-zero risk-free rate must reduce the ratio and rename the statistic, so the two
+    /// variants cannot silently overwrite each other in the produced statistics map.
+    #[rstest]
+    fn test_risk_free_rate_lowers_ratio_and_renames() {
+        let values = [0.01, -0.02, 0.015, -0.005, 0.025];
+        let returns = create_returns(&values);
+
+        let base = SharpeRatio::new(Some(252), None);
+        let with_rf = SharpeRatio::new(Some(252), Some(0.002));
+
+        let base_value = base.calculate_from_returns(&returns).unwrap();
+        let rf_value = with_rf.calculate_from_returns(&returns).unwrap();
+
+        assert!(rf_value < base_value);
+        assert_eq!(base.name(), "Sharpe Ratio (252 days)");
+        assert_eq!(with_rf.name(), "Sharpe Ratio (252 days, rf 0.002)");
+    }
+
+    /// An explicit zero must be indistinguishable from the default, including the name, because
+    /// that name is the key existing consumers read.
+    #[rstest]
+    fn test_zero_risk_free_rate_matches_default() {
+        let returns = create_returns(&[0.01, -0.02, 0.015, -0.005, 0.025]);
+        let default = SharpeRatio::new(Some(252), None);
+        let explicit_zero = SharpeRatio::new(Some(252), Some(0.0));
+
+        assert_eq!(default.name(), explicit_zero.name());
+        assert_eq!(
+            default.calculate_from_returns(&returns),
+            explicit_zero.calculate_from_returns(&returns)
+        );
+    }
+
     #[rstest]
     fn test_valid_sharpe_ratio() {
-        let ratio = SharpeRatio::new(Some(252));
+        let ratio = SharpeRatio::new(Some(252), None);
         let returns = create_returns(&[0.01, -0.02, 0.015, -0.005, 0.025]);
         let result = ratio.calculate_from_returns(&returns);
         assert!(result.is_some());
@@ -152,7 +199,7 @@ mod tests {
 
     #[rstest]
     fn test_name() {
-        let ratio = SharpeRatio::new(None);
+        let ratio = SharpeRatio::new(None, None);
         assert_eq!(ratio.name(), "Sharpe Ratio (252 days)");
     }
 }

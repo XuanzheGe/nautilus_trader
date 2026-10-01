@@ -80,8 +80,10 @@ pub struct PortfolioConfig {
     /// The interval (milliseconds) between portfolio snapshot emissions per account.
     /// When set, a [`PortfolioSnapshot`] is emitted at this cadence while the
     /// account holds at least one open position, carrying continuous
-    /// mark-to-market equity. When `None` (the default), no fine-grained snapshots
-    /// are emitted; the `equity_curve` setting still controls daily snapshots.
+    /// mark-to-market equity. Also records after each position change and at shutdown
+    /// so positions closed between timer ticks retain their final state.
+    /// When `None` (the default), no fine-grained snapshots are emitted;
+    /// the `equity_curve` setting still controls daily snapshots.
     ///
     /// [`PortfolioSnapshot`]: nautilus_model::events::PortfolioSnapshot
     #[serde(default)]

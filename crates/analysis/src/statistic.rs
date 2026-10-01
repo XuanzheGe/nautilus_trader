@@ -19,58 +19,55 @@ use nautilus_model::{orders::Order, position::Position};
 
 use crate::Returns;
 
-const IMPL_ERR: &str = "is not implemented for";
-
 /// Trait for portfolio performance statistics that can be calculated from different data sources.
 ///
 /// This trait provides a flexible framework for implementing various financial performance
 /// metrics that can operate on returns, realized PnLs, orders, or positions data.
-/// Each statistic implementation should override the relevant calculation methods.
+///
+/// # Partial implementations
+///
+/// Every hook defaults to `None`, so a statistic implements only the sources it is defined over.
+/// The analyzer calls every hook on every registered statistic and filters the results by
+/// `Option`, as `get_performance_stats_general` already does - a statistic that does not apply to a
+/// given source is simply skipped. Returning `None` rather than panicking is what makes the trait
+/// safely extensible: a statistic defined over one source cannot abort the whole computation.
 #[allow(unused_variables)]
 pub trait PortfolioStatistic: Debug {
     type Item;
 
     /// Returns the name of this statistic for display and identification purposes.
+    ///
+    /// This is the key the statistic is registered and reported under, so anything that changes
+    /// the meaning of the value (a period, a threshold, a risk-free rate) belongs in the name.
     fn name(&self) -> String;
 
     /// Calculates the statistic from time-indexed returns data.
     ///
-    /// # Panics
-    ///
-    /// Panics if this method is not implemented for the specific statistic.
+    /// Defaults to `None` for statistics not defined over a returns series.
     fn calculate_from_returns(&self, returns: &Returns) -> Option<Self::Item> {
-        panic!("`calculate_from_returns` {IMPL_ERR} `{}`", self.name());
+        None
     }
 
     /// Calculates the statistic from realized profit and loss values.
     ///
-    /// # Panics
-    ///
-    /// Panics if this method is not implemented for the specific statistic.
+    /// Defaults to `None` for statistics not defined over realized PnLs.
     fn calculate_from_realized_pnls(&self, realized_pnls: &[f64]) -> Option<Self::Item> {
-        panic!(
-            "`calculate_from_realized_pnls` {IMPL_ERR} `{}`",
-            self.name()
-        );
+        None
     }
 
     /// Calculates the statistic from order data.
     ///
-    /// # Panics
-    ///
-    /// Panics if this method is not implemented for the specific statistic.
+    /// Defaults to `None` for statistics not defined over orders.
     #[allow(dead_code)]
     fn calculate_from_orders(&self, orders: Vec<Box<dyn Order>>) -> Option<Self::Item> {
-        panic!("`calculate_from_orders` {IMPL_ERR} `{}`", self.name());
+        None
     }
 
     /// Calculates the statistic from position data.
     ///
-    /// # Panics
-    ///
-    /// Panics if this method is not implemented for the specific statistic.
+    /// Defaults to `None` for statistics not defined over positions.
     fn calculate_from_positions(&self, positions: &[Position]) -> Option<Self::Item> {
-        panic!("`calculate_from_positions` {IMPL_ERR} `{}`", self.name());
+        None
     }
 
     /// Calculates the statistic from time-indexed strategy returns relative to a benchmark.

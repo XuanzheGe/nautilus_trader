@@ -18,13 +18,16 @@
 use std::{cell::RefCell, rc::Rc};
 
 use indexmap::{IndexMap, IndexSet};
-use nautilus_analysis::snapshot::PortfolioStatistics;
+use nautilus_analysis::{
+    python::statistic_adapter::{resolve_statistic, resolve_statistic_name},
+    snapshot::PortfolioStatistics,
+};
 use nautilus_common::python::config_error_to_pyvalue_err;
 use nautilus_core::python::{to_pyruntime_err, to_pyvalue_err};
 use nautilus_model::{
     accounts::AccountAny,
     events::PortfolioSnapshot,
-    identifiers::{AccountId, InstrumentId, Venue},
+    identifiers::{AccountId, InstrumentId, StrategyId, Venue},
     python::account::account_any_to_pyobject,
     types::{Currency, Money, Price},
 };
@@ -262,6 +265,78 @@ impl PyPortfolio {
             .borrow_mut()
             .unrealized_pnls(&venue, account_id.as_ref(), target_currency)
             .ok_or_else(|| to_pyruntime_err("failed to calculate unrealized PnLs"))?;
+        currency_money_map_to_pydict(py, map)
+    }
+
+    /// Registers a portfolio statistic to be computed by `statistics()`.
+    ///
+    /// Accepts a built-in statistic or any object exposing at least one `calculate_from_*` method.
+    /// Statistics are keyed by name, so registering one whose name already exists replaces it.
+    ///
+    /// This is the only way to change what `statistics()` computes: registering on a separately
+    /// constructed analyzer has no effect on this portfolio's results.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `statistic` exposes no calculation hook at all.
+    #[pyo3(name = "register_statistic")]
+    fn py_register_statistic(&mut self, py: Python<'_>, statistic: Py<PyAny>) -> PyResult<()> {
+        let resolved = resolve_statistic(py, statistic)?;
+        self.0.borrow_mut().register_statistic(resolved);
+
+        Ok(())
+    }
+
+    /// Removes a previously registered portfolio statistic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the statistic's name cannot be resolved.
+    #[pyo3(name = "deregister_statistic")]
+    fn py_deregister_statistic(&mut self, py: Python<'_>, statistic: Py<PyAny>) -> PyResult<()> {
+        let name = resolve_statistic_name(py, &statistic)?;
+        self.0.borrow_mut().deregister_statistic(&name);
+
+        Ok(())
+    }
+
+    #[pyo3(
+        name = "unrealized_pnls_for_strategy",
+        signature = (strategy_id, venue=None, target_currency=None)
+    )]
+    fn py_unrealized_pnls_for_strategy(
+        &self,
+        py: Python<'_>,
+        strategy_id: StrategyId,
+        venue: Option<Venue>,
+        target_currency: Option<Currency>,
+    ) -> PyResult<Py<PyDict>> {
+        let map = self
+            .0
+            .borrow()
+            .unrealized_pnls_for_strategy(&strategy_id, venue.as_ref(), target_currency)
+            .ok_or_else(|| {
+                to_pyruntime_err("failed to calculate unrealized PnLs for strategy")
+            })?;
+        currency_money_map_to_pydict(py, map)
+    }
+
+    #[pyo3(
+        name = "realized_pnls_for_strategy",
+        signature = (strategy_id, venue=None, target_currency=None)
+    )]
+    fn py_realized_pnls_for_strategy(
+        &self,
+        py: Python<'_>,
+        strategy_id: StrategyId,
+        venue: Option<Venue>,
+        target_currency: Option<Currency>,
+    ) -> PyResult<Py<PyDict>> {
+        let map = self
+            .0
+            .borrow()
+            .realized_pnls_for_strategy(&strategy_id, venue.as_ref(), target_currency)
+            .ok_or_else(|| to_pyruntime_err("failed to calculate realized PnLs for strategy"))?;
         currency_money_map_to_pydict(py, map)
     }
 

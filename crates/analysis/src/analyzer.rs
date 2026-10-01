@@ -25,12 +25,18 @@ use nautilus_model::{
     position::Position,
     types::{Currency, Money},
 };
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::{
     Returns,
     snapshot::PortfolioStatistics,
     statistic::PortfolioStatistic,
+    statistics::{
+        cagr::CAGR, calmar_ratio::CalmarRatio, expected_shortfall::ExpectedShortfall,
+        max_drawdown::MaxDrawdown, max_drawdown_duration::MaxDrawdownDuration,
+        max_drawdown_recovery::MaxDrawdownRecovery, omega_ratio::OmegaRatio,
+        ulcer_index::UlcerIndex, value_at_risk::ValueAtRisk,
+    },
     statistics::{
         expectancy::Expectancy, long_ratio::LongRatio, loser_avg::AvgLoser, loser_max::MaxLoser,
         loser_min::MinLoser, profit_factor::ProfitFactor, returns_avg::ReturnsAverage,
@@ -43,6 +49,12 @@ use crate::{
 };
 
 pub type Statistic = Arc<dyn PortfolioStatistic<Item = f64> + Send + Sync>;
+
+/// Appended to returns-statistic names when the alias falls back to per-trade price returns.
+///
+/// Brackets distinguish provenance from the parenthesised parameter qualifiers the statistics
+/// already use (for example `Sharpe Ratio (252 days)`).
+pub const FALLBACK_RETURNS_SUFFIX: &str = "[trade returns]";
 
 /// Analyzes portfolio performance and calculates various statistics.
 ///
@@ -60,6 +72,10 @@ pub struct PortfolioAnalyzer {
     pub statistics: AHashMap<String, Statistic>,
     pub account_balances_starting: IndexMap<Currency, Money>,
     pub account_balances: IndexMap<Currency, Money>,
+    /// Per-currency unrealized PnL from the latest complete, current portfolio snapshots.
+    ///
+    /// Empty when any account lacks a trustworthy snapshot.
+    pub unrealized_pnls: IndexMap<Currency, Money>,
     pub positions: Vec<Position>,
     pub realized_pnls: AHashMap<Currency, Vec<(PositionId, UnixNanos, f64)>>,
     pub recorded_realized_pnls: AHashMap<Currency, Vec<(PositionId, UnixNanos, f64)>>,
@@ -70,6 +86,15 @@ pub struct PortfolioAnalyzer {
     /// Contains portfolio returns when available, otherwise position returns.
     /// Kept as a public field for API stability; prefer the `returns()` accessor.
     pub returns: Returns,
+    /// Whether mark-to-market equity returns were attempted and could not be resolved.
+    ///
+    /// Deliberately private and deliberately not a result field: it exists only to qualify the
+    /// reported statistic names, so a consumer reads the provenance off the key it already has to
+    /// look up rather than having to know to check a parallel field. Only a genuine degradation
+    /// sets it - an analyzer fed directly through `add_return` chose its own series and is not
+    /// degraded.
+    returns_degraded: bool,
+    snapshot_balance_adjustments: IndexMap<Currency, Decimal>,
 }
 
 impl Default for PortfolioAnalyzer {
@@ -90,12 +115,25 @@ impl Default for PortfolioAnalyzer {
         analyzer.register_statistic(Arc::new(ReturnsAverage {}));
         analyzer.register_statistic(Arc::new(ReturnsAverageLoss {}));
         analyzer.register_statistic(Arc::new(ReturnsAverageWin {}));
-        analyzer.register_statistic(Arc::new(SharpeRatio::new(None)));
-        analyzer.register_statistic(Arc::new(SortinoRatio::new(None)));
+        analyzer.register_statistic(Arc::new(SharpeRatio::new(None, None)));
+        analyzer.register_statistic(Arc::new(SortinoRatio::new(None, None)));
         analyzer.register_statistic(Arc::new(TailRatio {}));
         analyzer.register_statistic(Arc::new(ProfitFactor {}));
         analyzer.register_statistic(Arc::new(RiskReturnRatio {}));
         analyzer.register_statistic(Arc::new(LongRatio::new(None)));
+
+        // Risk and drawdown metrics. These are part of the default set because a result without a
+        // drawdown figure is not a usable performance report; all are returns-driven and cost one
+        // pass over the already-materialized returns series.
+        analyzer.register_statistic(Arc::new(MaxDrawdown::new()));
+        analyzer.register_statistic(Arc::new(MaxDrawdownDuration::new()));
+        analyzer.register_statistic(Arc::new(MaxDrawdownRecovery::new()));
+        analyzer.register_statistic(Arc::new(CalmarRatio::new(None)));
+        analyzer.register_statistic(Arc::new(CAGR::new(None)));
+        analyzer.register_statistic(Arc::new(UlcerIndex::new()));
+        analyzer.register_statistic(Arc::new(OmegaRatio::new(None)));
+        analyzer.register_statistic(Arc::new(ValueAtRisk::new(None)));
+        analyzer.register_statistic(Arc::new(ExpectedShortfall::new(None)));
         analyzer
     }
 }
@@ -110,12 +148,15 @@ impl PortfolioAnalyzer {
             statistics: AHashMap::new(),
             account_balances_starting: IndexMap::new(),
             account_balances: IndexMap::new(),
+            unrealized_pnls: IndexMap::new(),
+            snapshot_balance_adjustments: IndexMap::new(),
             positions: Vec::new(),
             realized_pnls: AHashMap::new(),
             recorded_realized_pnls: AHashMap::new(),
             position_returns: BTreeMap::new(),
             portfolio_returns: BTreeMap::new(),
             returns: BTreeMap::new(),
+            returns_degraded: false,
         }
     }
 
@@ -144,6 +185,9 @@ impl PortfolioAnalyzer {
         self.position_returns.clear();
         self.portfolio_returns.clear();
         self.returns.clear();
+        self.returns_degraded = false;
+        self.unrealized_pnls.clear();
+        self.snapshot_balance_adjustments.clear();
     }
 
     /// Returns all tracked currencies.
@@ -186,6 +230,8 @@ impl PortfolioAnalyzer {
     pub fn calculate_statistics(&mut self, account: &dyn Account, positions: &[Position]) {
         self.account_balances_starting = account.starting_balances().into_iter().collect();
         self.account_balances = account.balances_total().into_iter().collect();
+        self.unrealized_pnls.clear();
+        self.snapshot_balance_adjustments.clear();
         self.positions.clear();
         self.realized_pnls.clear();
         self.position_returns.clear();
@@ -196,7 +242,10 @@ impl PortfolioAnalyzer {
 
         if let Some(account_returns) = Self::calculate_account_returns(account) {
             self.portfolio_returns = account_returns;
+            self.returns_degraded = false;
             self.sync_returns_alias();
+        } else {
+            self.returns_degraded = true;
         }
     }
 
@@ -234,6 +283,44 @@ impl PortfolioAnalyzer {
         recorded_realized_pnls: AHashMap<Currency, Vec<(PositionId, UnixNanos, f64)>>,
     ) -> Self {
         let mut analyzer = Self::default();
+        analyzer.load_accounts_with_snapshots(
+            accounts,
+            positions,
+            position_snapshots,
+            portfolio_snapshots,
+            recorded_realized_pnls,
+        );
+        analyzer
+    }
+
+    /// Creates an analyzer that computes `statistics` and holds no data yet.
+    ///
+    /// Separates configuration from data: the registry decides *what* is computed, while
+    /// [`PortfolioAnalyzer::load_accounts_with_snapshots`] supplies *what it is computed over*. A
+    /// caller that owns a configured registry can therefore keep it, instead of patching a
+    /// default-constructed analyzer after the fact.
+    #[must_use]
+    pub fn with_statistics(statistics: AHashMap<String, Statistic>) -> Self {
+        let mut analyzer = Self::new();
+        analyzer.statistics = statistics;
+        analyzer
+    }
+
+    /// Populates this analyzer from venue accounts, positions and portfolio snapshots.
+    ///
+    /// Replaces existing analysis data while leaving the registered statistics untouched, so it
+    /// can be called repeatedly on an analyzer configured through
+    /// [`PortfolioAnalyzer::with_statistics`].
+    pub fn load_accounts_with_snapshots<'a>(
+        &mut self,
+        accounts: &[AccountAny],
+        positions: &[Position],
+        position_snapshots: &[Position],
+        portfolio_snapshots: impl IntoIterator<Item = &'a PortfolioSnapshot>,
+        recorded_realized_pnls: AHashMap<Currency, Vec<(PositionId, UnixNanos, f64)>>,
+    ) {
+        let analyzer = self;
+        analyzer.reset();
         let mut account_ids = Vec::with_capacity(accounts.len());
 
         for account in accounts {
@@ -265,8 +352,151 @@ impl PortfolioAnalyzer {
         analyzer.add_positions(positions);
         analyzer.add_positions(position_snapshots);
         analyzer.recorded_realized_pnls = recorded_realized_pnls;
-        analyzer.set_portfolio_returns_from_snapshots(&account_ids, portfolio_snapshots);
-        analyzer
+
+        let portfolio_snapshots: Vec<&PortfolioSnapshot> =
+            portfolio_snapshots.into_iter().collect();
+        analyzer.set_unrealized_pnls_from_snapshots(accounts, &portfolio_snapshots);
+        analyzer.set_portfolio_returns_from_snapshots(
+            &account_ids,
+            portfolio_snapshots.iter().copied(),
+        );
+    }
+
+    /// Loads unrealized PnL and cash adjustments from each account's latest valid snapshot.
+    ///
+    /// Cash purchases and sales transfer principal between balances and open holdings. The
+    /// adjustment `total_equity - balances.total - unrealized_pnls` excludes those transfers from
+    /// balance-based PnL while preserving the true unrealized PnL as a separate value. Margin
+    /// accounts have no such transfer, so their adjustment is zero.
+    ///
+    /// # Epoch consistency
+    ///
+    /// `total_pnl` pairs these values with balances read at load time, so they must come
+    /// from the same instant. A snapshot is accepted only when its own recorded balances still
+    /// equal the account's current balances; otherwise the balances have moved since the snapshot
+    /// and adding its mark-to-market would double count anything realized in between.
+    ///
+    /// The derivation is all-or-nothing across `accounts`: if any account's snapshot is missing,
+    /// carries unpriced instruments, or has drifted, nothing is recorded. A partial contribution
+    /// summed against full balances would understate rather than simply be absent, and the sibling
+    /// snapshot-returns derivation rejects partial input for the same reason.
+    fn set_unrealized_pnls_from_snapshots(
+        &mut self,
+        accounts: &[AccountAny],
+        snapshots: &[&PortfolioSnapshot],
+    ) {
+        self.unrealized_pnls.clear();
+        self.snapshot_balance_adjustments.clear();
+
+        if accounts.is_empty() {
+            return;
+        }
+
+        let mut latest: AHashMap<AccountId, &PortfolioSnapshot> = AHashMap::new();
+
+        for snapshot in snapshots {
+            latest
+                .entry(snapshot.account_id)
+                .and_modify(|current| {
+                    if (snapshot.ts_event, snapshot.ts_init) >= (current.ts_event, current.ts_init)
+                    {
+                        *current = snapshot;
+                    }
+                })
+                .or_insert(snapshot);
+        }
+
+        let mut contributions: IndexMap<Currency, Money> = IndexMap::new();
+        let mut adjustments: IndexMap<Currency, Decimal> = IndexMap::new();
+
+        for account in accounts {
+            let account_ref: &dyn Account = match account {
+                AccountAny::Margin(margin) => margin,
+                AccountAny::Cash(cash) => cash,
+                AccountAny::Betting(betting) => betting,
+                AccountAny::Wallet(wallet) => wallet,
+            };
+
+            let Some(snapshot) = latest.get(&account_ref.id()) else {
+                return; // No sample for this account
+            };
+
+            if snapshot.is_stale || !snapshot.unpriced_instruments.is_empty() {
+                return; // Valuation inputs were incomplete
+            }
+
+            // Reject a drifted sample: balances must still match the snapshot's own epoch.
+            let current = account_ref.balances_total();
+            if current.len() != snapshot.balances.len()
+                || snapshot
+                    .balances
+                    .iter()
+                    .any(|balance| current.get(&balance.currency) != Some(&balance.total))
+            {
+                return;
+            }
+
+            let mut account_adjustments: IndexMap<Currency, Decimal> = IndexMap::new();
+
+            for equity in &snapshot.total_equity {
+                let adjustment = account_adjustments.entry(equity.currency).or_default();
+                let Some(total) = adjustment.checked_add(equity.as_decimal()) else {
+                    return;
+                };
+                *adjustment = total;
+            }
+
+            for balance in &snapshot.balances {
+                let Some(adjustment) = account_adjustments.get_mut(&balance.currency) else {
+                    return;
+                };
+                let Some(total) = adjustment.checked_sub(balance.total.as_decimal()) else {
+                    return;
+                };
+                *adjustment = total;
+            }
+
+            for contribution in &snapshot.unrealized_pnls {
+                let Some(adjustment) = account_adjustments.get_mut(&contribution.currency) else {
+                    return;
+                };
+                let Some(total) = adjustment.checked_sub(contribution.as_decimal()) else {
+                    return;
+                };
+                *adjustment = total;
+
+                let entry = contributions
+                    .entry(contribution.currency)
+                    .or_insert_with(|| Money::zero(contribution.currency));
+
+                let Some(total) = entry
+                    .as_decimal()
+                    .checked_add(contribution.as_decimal())
+                    .and_then(|value| Money::from_decimal(value, contribution.currency).ok())
+                else {
+                    return; // Out of range; prefer absent over wrong
+                };
+
+                *entry = total;
+            }
+
+            for (currency, adjustment) in account_adjustments {
+                let entry = adjustments.entry(currency).or_default();
+                let Some(total) = entry.checked_add(adjustment) else {
+                    return;
+                };
+                *entry = total;
+            }
+        }
+
+        self.unrealized_pnls = contributions;
+        self.snapshot_balance_adjustments = adjustments;
+    }
+
+    /// Returns unrealized PnL for open positions in `currency`, if known.
+    #[must_use]
+    pub fn unrealized_pnl_for(&self, currency: &Currency) -> Option<&Money> {
+        self.unrealized_pnls.get(currency)
     }
 
     /// Replaces the primary returns source with snapshot-backed portfolio returns when resolvable.
@@ -277,6 +507,11 @@ impl PortfolioAnalyzer {
     ) {
         if let Some(returns) = Self::calculate_snapshot_returns(account_ids, snapshots) {
             self.portfolio_returns = returns;
+            self.returns_degraded = false;
+            self.sync_returns_alias();
+        } else {
+            self.portfolio_returns.clear();
+            self.returns_degraded = true;
             self.sync_returns_alias();
         }
     }
@@ -287,7 +522,9 @@ impl PortfolioAnalyzer {
         let mut pnls = AHashMap::new();
 
         for currency in self.currencies() {
-            if let Ok(stats) = self.get_performance_stats_pnls(Some(currency), None) {
+            if let Ok(stats) =
+                self.get_performance_stats_pnls(Some(currency), self.unrealized_pnl_for(currency))
+            {
                 pnls.insert(currency.code.to_string(), stats);
             }
         }
@@ -398,7 +635,7 @@ impl PortfolioAnalyzer {
             let day_start = UnixNanos::from(
                 event.ts_event.as_u64() - (event.ts_event.as_u64() % NANOSECONDS_IN_DAY),
             );
-            daily_balances.insert(day_start, balance.total.as_f64());
+            daily_balances.insert(day_start, balance.total.as_decimal());
         }
 
         Self::calculate_daily_returns(&daily_balances)
@@ -413,44 +650,58 @@ impl PortfolioAnalyzer {
             return None;
         }
 
-        let mut currency = None;
-        let mut equity_by_account: AHashMap<AccountId, BTreeMap<UnixNanos, f64>> = AHashMap::new();
+        let mut snapshots: Vec<_> = snapshots
+            .into_iter()
+            .filter(|snapshot| expected_accounts.contains(&snapshot.account_id))
+            .collect();
+        snapshots.sort_by_key(|snapshot| (snapshot.ts_event, snapshot.ts_init));
+        let mut daily_snapshots: AHashMap<AccountId, BTreeMap<UnixNanos, &PortfolioSnapshot>> =
+            AHashMap::new();
 
         for snapshot in snapshots {
-            if !expected_accounts.contains(&snapshot.account_id) {
-                continue;
-            }
-
-            if !snapshot.unpriced_instruments.is_empty() {
-                continue;
-            }
-
-            if snapshot.total_equity.len() != 1 {
-                return None;
-            }
-
-            let equity = snapshot
-                .base_currency_equity
-                .unwrap_or(snapshot.total_equity[0]);
-
-            if let Some(existing_currency) = currency {
-                if existing_currency != equity.currency {
-                    return None;
-                }
-            } else {
-                currency = Some(equity.currency);
-            }
-
-            let is_registration = !equity_by_account.contains_key(&snapshot.account_id);
+            let is_registration = !daily_snapshots.contains_key(&snapshot.account_id);
             let day_start = Self::snapshot_day_start(snapshot.ts_event, is_registration);
-            equity_by_account
+            daily_snapshots
                 .entry(snapshot.account_id)
                 .or_default()
-                .insert(day_start, equity.as_f64());
+                .insert(day_start, snapshot);
         }
 
-        if equity_by_account.len() != expected_accounts.len() {
+        if daily_snapshots.len() != expected_accounts.len() {
             return None;
+        }
+
+        let mut currency = None;
+        let mut equity_by_account = AHashMap::new();
+
+        for (account_id, snapshots) in daily_snapshots {
+            let mut equity_by_day = BTreeMap::new();
+
+            for (day, snapshot) in snapshots {
+                // An explicitly incomplete close cannot be replaced by yesterday's valuation
+                if snapshot.is_stale
+                    || !snapshot.unpriced_instruments.is_empty()
+                    || snapshot.total_equity.len() != 1
+                {
+                    return None;
+                }
+
+                let equity = snapshot
+                    .base_currency_equity
+                    .unwrap_or(snapshot.total_equity[0]);
+
+                if let Some(existing_currency) = currency {
+                    if existing_currency != equity.currency {
+                        return None;
+                    }
+                } else {
+                    currency = Some(equity.currency);
+                }
+
+                equity_by_day.insert(day, equity.as_decimal());
+            }
+
+            equity_by_account.insert(account_id, equity_by_day);
         }
 
         let first_day = equity_by_account
@@ -478,8 +729,9 @@ impl PortfolioAnalyzer {
             if current_equity.len() == expected_accounts.len() {
                 let total = expected_accounts
                     .iter()
-                    .map(|account_id| current_equity[account_id])
-                    .sum();
+                    .try_fold(Decimal::ZERO, |total, account_id| {
+                        total.checked_add(current_equity[account_id])
+                    })?;
                 daily_equity.insert(current_day, total);
             }
 
@@ -504,7 +756,7 @@ impl PortfolioAnalyzer {
         }
     }
 
-    fn calculate_daily_returns(daily_equity: &BTreeMap<UnixNanos, f64>) -> Option<Returns> {
+    fn calculate_daily_returns(daily_equity: &BTreeMap<UnixNanos, Decimal>) -> Option<Returns> {
         if daily_equity.len() < 2 {
             return None;
         }
@@ -512,8 +764,8 @@ impl PortfolioAnalyzer {
         let mut returns = Returns::new();
         let mut current_day = *daily_equity.keys().next()?;
         let last_day = *daily_equity.keys().next_back()?;
-        let mut current_balance: Option<f64> = None;
-        let mut previous_balance: Option<f64> = None;
+        let mut current_balance: Option<Decimal> = None;
+        let mut previous_balance: Option<Decimal> = None;
 
         loop {
             if let Some(balance) = daily_equity.get(&current_day) {
@@ -523,12 +775,13 @@ impl PortfolioAnalyzer {
             let balance = current_balance?;
 
             if let Some(previous) = previous_balance
-                && previous != 0.0
+                && !previous.is_zero()
+                && let Some(value) = balance
+                    .checked_sub(previous)
+                    .and_then(|difference| difference.checked_div(previous))
+                    .and_then(|value| value.to_f64())
             {
-                let value: f64 = (balance / previous) - 1.0;
-                if value.is_finite() {
-                    returns.insert(current_day, value);
-                }
+                returns.insert(current_day, value);
             }
 
             previous_balance = Some(balance);
@@ -625,12 +878,16 @@ impl PortfolioAnalyzer {
 
     /// Calculates total PnL including unrealized PnL if provided.
     ///
+    /// Loaded portfolio snapshots exclude transfers between cash and open holdings from the
+    /// balance change. The optional unrealized PnL is added to this adjusted balance change.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - No currency is specified in a multi-currency portfolio.
     /// - The specified currency is not found in account balances.
     /// - The unrealized PnL currency does not match the specified currency.
+    /// - The PnL calculation exceeds decimal range.
     #[expect(clippy::missing_panics_doc)] // Guarded by length check
     pub fn total_pnl(
         &self,
@@ -667,8 +924,22 @@ impl PortfolioAnalyzer {
             .get(currency)
             .unwrap_or(default_money);
 
-        let unrealized_pnl_f64 = unrealized_pnl.map_or(0.0, Money::as_f64);
-        Ok((account_balance.as_f64() - account_balance_starting.as_f64()) + unrealized_pnl_f64)
+        account_balance
+            .as_decimal()
+            .checked_sub(account_balance_starting.as_decimal())
+            .and_then(|difference| {
+                difference.checked_add(
+                    self.snapshot_balance_adjustments
+                        .get(currency)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+            })
+            .and_then(|difference| {
+                difference.checked_add(unrealized_pnl.map_or(Decimal::ZERO, Money::as_decimal))
+            })
+            .and_then(|value| value.to_f64())
+            .ok_or("PnL calculation exceeded decimal range")
     }
 
     /// Calculates total PnL as a percentage of starting balance.
@@ -679,6 +950,7 @@ impl PortfolioAnalyzer {
     /// - No currency is specified in a multi-currency portfolio.
     /// - The specified currency is not found in account balances.
     /// - The unrealized PnL currency does not match the specified currency.
+    /// - The PnL calculation exceeds decimal range.
     #[expect(clippy::missing_panics_doc)] // Guarded by length check
     pub fn total_pnl_percentage(
         &self,
@@ -704,10 +976,7 @@ impl PortfolioAnalyzer {
             return Err("Unrealized PnL currency does not match specified currency");
         }
 
-        let account_balance = self
-            .account_balances
-            .get(currency)
-            .ok_or("Specified currency not found in account balances")?;
+        let total_pnl = self.total_pnl(Some(currency), unrealized_pnl)?;
 
         let default_money = &Money::zero(*currency);
         let account_balance_starting = self
@@ -719,12 +988,9 @@ impl PortfolioAnalyzer {
             return Ok(0.0);
         }
 
-        let unrealized_pnl_f64 = unrealized_pnl.map_or(0.0, Money::as_f64);
-        let current = account_balance.as_f64() + unrealized_pnl_f64;
         let starting = account_balance_starting.as_f64();
-        let difference = current - starting;
 
-        Ok((difference / starting) * 100.0)
+        Ok((total_pnl / starting) * 100.0)
     }
 
     /// Gets all PnL-related performance statistics.
@@ -771,7 +1037,33 @@ impl PortfolioAnalyzer {
     /// Gets all return-based performance statistics.
     #[must_use]
     pub fn get_performance_stats_returns(&self) -> AHashMap<String, f64> {
-        self.calculate_returns_stats(self.returns())
+        let stats = self.calculate_returns_stats(self.returns());
+
+        if !self.uses_fallback_returns() {
+            return stats;
+        }
+
+        // The alias fell back to per-trade price returns, which are unlevered, independent of
+        // account size, and exclude commissions - not comparable to mark-to-market equity returns.
+        // The name is the key these are reported under, so the provenance belongs in it: a consumer
+        // looking for the equity-based figure then finds nothing, rather than a number that
+        // silently changed meaning. `get_performance_stats_position_returns` is not qualified,
+        // because there the caller asked for that series explicitly.
+        stats
+            .into_iter()
+            .map(|(name, value)| (format!("{name} {FALLBACK_RETURNS_SUFFIX}"), value))
+            .collect()
+    }
+
+    /// Returns whether mark-to-market equity returns were attempted, failed, and the alias
+    /// therefore reports per-trade price returns instead.
+    ///
+    /// False for an analyzer whose returns were supplied directly: that is not a degradation.
+    #[must_use]
+    pub fn uses_fallback_returns(&self) -> bool {
+        self.returns_degraded
+            && self.portfolio_returns.is_empty()
+            && !self.position_returns.is_empty()
     }
 
     /// Gets all position-return-based performance statistics.
@@ -1207,6 +1499,378 @@ mod tests {
         )
     }
 
+    fn cash_account_with_balance(account_id: &str, total: f64, currency: Currency) -> AccountAny {
+        let state = AccountState::new(
+            AccountId::new(account_id),
+            AccountType::Cash,
+            vec![AccountBalance::new(
+                Money::new(total, currency),
+                Money::new(0.0, currency),
+                Money::new(total, currency),
+            )],
+            vec![],
+            true,
+            UUID4::new(),
+            UnixNanos::from(0),
+            UnixNanos::from(0),
+            Some(currency),
+        );
+        AccountAny::Cash(CashAccount::new(state, false, false))
+    }
+
+    fn snapshot_with_balance(
+        account_id: &str,
+        balance: f64,
+        equity: f64,
+        currency: Currency,
+        ts_event: u64,
+    ) -> PortfolioSnapshot {
+        // `equity` is expressed as balance + unrealized, so the sample stays self-consistent.
+        let unrealized = Money::new(equity - balance, currency);
+        PortfolioSnapshot::new(
+            AccountId::new(account_id),
+            AccountType::Cash,
+            Some(currency),
+            vec![AccountBalance::new(
+                Money::new(balance, currency),
+                Money::new(0.0, currency),
+                Money::new(balance, currency),
+            )],
+            vec![],
+            vec![unrealized],
+            vec![],
+            vec![Money::new(equity, currency)],
+            Some(Money::new(equity, currency)),
+            false,
+            vec![],
+            vec![],
+            vec![],
+            UUID4::new(),
+            UnixNanos::from(ts_event),
+            UnixNanos::from(ts_event),
+        )
+    }
+
+    #[rstest]
+    #[case::long_gain(500, 1_100, 100, 0)]
+    #[case::long_loss(500, 900, -100, 0)]
+    #[case::short_gain(1_500, 1_100, 100, 0)]
+    #[case::short_loss(1_500, 900, -100, 0)]
+    #[case::partially_closed_long(800, 1_100, 50, 50)]
+    #[case::partially_closed_short(1_300, 1_100, 50, 50)]
+    #[case::long_with_commission(498, 1_098, 100, -2)]
+    fn test_cash_snapshot_pnl_excludes_open_position_cost(
+        #[case] cash: i64,
+        #[case] equity: i64,
+        #[case] unrealized: i64,
+        #[case] realized: i64,
+    ) {
+        let currency = Currency::USD();
+        let mut account = cash_account_with_balance("SIM-001", 1_000.0, currency);
+        let mut event = create_account_state(cash as f64, currency, 1);
+        event.account_id = AccountId::new("SIM-001");
+        account.apply(event).unwrap();
+        let mut snapshot =
+            snapshot_with_balance("SIM-001", cash as f64, equity as f64, currency, 1);
+        snapshot.unrealized_pnls =
+            vec![Money::from_decimal(Decimal::from(unrealized), currency).unwrap()];
+        snapshot.realized_pnls =
+            vec![Money::from_decimal(Decimal::from(realized), currency).unwrap()];
+        let analyzer = PortfolioAnalyzer::from_accounts_with_snapshots(
+            &[account],
+            &[],
+            &[],
+            [&snapshot],
+            AHashMap::new(),
+        );
+        let override_pnl = Money::from_decimal(Decimal::from(25), currency).unwrap();
+
+        let unrealized_pnl = analyzer.unrealized_pnl_for(&currency).unwrap();
+        let realized_pnl = analyzer.total_pnl(Some(&currency), None).unwrap();
+        let total_pnl = analyzer
+            .total_pnl(Some(&currency), Some(unrealized_pnl))
+            .unwrap();
+        let overridden = analyzer
+            .total_pnl(Some(&currency), Some(&override_pnl))
+            .unwrap();
+        let stats = analyzer.statistics();
+
+        assert_eq!(unrealized_pnl.as_decimal(), Decimal::from(unrealized));
+        assert_eq!(realized_pnl, realized as f64);
+        assert_eq!(total_pnl, (realized + unrealized) as f64);
+        assert_eq!(overridden, (realized + 25) as f64);
+        assert_eq!(
+            stats.pnls["USD"]["PnL (total)"],
+            (realized + unrealized) as f64
+        );
+        assert!(approx_eq!(
+            f64,
+            stats.pnls["USD"]["PnL% (total)"],
+            (realized + unrealized) as f64 / 10.0,
+            epsilon = 1e-12
+        ));
+    }
+
+    #[rstest]
+    fn test_cash_snapshot_adjustments_aggregate_across_accounts() {
+        let currency = Currency::USD();
+        let mut accounts = [
+            cash_account_with_balance("SIM-001", 1_000.0, currency),
+            cash_account_with_balance("SIM-002", 1_000.0, currency),
+        ];
+        let mut snapshots = [
+            snapshot_with_balance("SIM-001", 500.0, 1_100.0, currency, 1),
+            snapshot_with_balance("SIM-002", 1_300.0, 1_100.0, currency, 1),
+        ];
+        snapshots[0].unrealized_pnls =
+            vec![Money::from_decimal(Decimal::from(100), currency).unwrap()];
+        snapshots[1].unrealized_pnls =
+            vec![Money::from_decimal(Decimal::from(50), currency).unwrap()];
+
+        for (account, snapshot) in accounts.iter_mut().zip(&snapshots) {
+            let mut event = create_account_state(snapshot.balances[0].total.as_f64(), currency, 1);
+            event.account_id = snapshot.account_id;
+            account.apply(event).unwrap();
+        }
+
+        let analyzer = PortfolioAnalyzer::from_accounts_with_snapshots(
+            &accounts,
+            &[],
+            &[],
+            snapshots.iter(),
+            AHashMap::new(),
+        );
+
+        assert_eq!(analyzer.total_pnl(Some(&currency), None).unwrap(), 50.0);
+        assert_eq!(
+            analyzer.unrealized_pnl_for(&currency).unwrap().as_decimal(),
+            Decimal::from(150)
+        );
+        assert_eq!(analyzer.statistics().pnls["USD"]["PnL (total)"], 200.0);
+    }
+
+    #[rstest]
+    #[case::stale(true)]
+    #[case::missing_equity(false)]
+    fn test_cash_snapshot_adjustments_clear_atomically_on_invalid_refresh(#[case] stale: bool) {
+        let currency = Currency::USD();
+        let accounts = [cash_account_with_balance("SIM-001", 500.0, currency)];
+        let mut snapshot = snapshot_with_balance("SIM-001", 500.0, 1_100.0, currency, 1);
+        snapshot.unrealized_pnls = vec![Money::from_decimal(Decimal::from(100), currency).unwrap()];
+        let mut analyzer = PortfolioAnalyzer::from_accounts_with_snapshots(
+            &accounts,
+            &[],
+            &[],
+            [&snapshot],
+            AHashMap::new(),
+        );
+        assert_eq!(
+            analyzer.snapshot_balance_adjustments[&currency],
+            Decimal::from(500)
+        );
+
+        if stale {
+            snapshot.is_stale = true;
+        } else {
+            snapshot.total_equity.clear();
+        }
+
+        analyzer.set_unrealized_pnls_from_snapshots(&accounts, &[&snapshot]);
+
+        assert!(analyzer.unrealized_pnls.is_empty());
+        assert!(analyzer.snapshot_balance_adjustments.is_empty());
+    }
+
+    #[rstest]
+    fn test_cash_snapshot_adjustments_clear_on_reset_and_account_only_analysis() {
+        let currency = Currency::USD();
+        let accounts = [cash_account_with_balance("SIM-001", 500.0, currency)];
+        let mut snapshot = snapshot_with_balance("SIM-001", 500.0, 1_100.0, currency, 1);
+        snapshot.unrealized_pnls = vec![Money::from_decimal(Decimal::from(100), currency).unwrap()];
+        let mut analyzer = PortfolioAnalyzer::from_accounts_with_snapshots(
+            &accounts,
+            &[],
+            &[],
+            [&snapshot],
+            AHashMap::new(),
+        );
+
+        analyzer.reset();
+
+        assert!(analyzer.unrealized_pnls.is_empty());
+        assert!(analyzer.snapshot_balance_adjustments.is_empty());
+
+        analyzer.set_unrealized_pnls_from_snapshots(&accounts, &[&snapshot]);
+        let account = MockAccount {
+            starting_balances: AHashMap::from_iter([(currency, Money::new(1_000.0, currency))]),
+            current_balances: AHashMap::from_iter([(currency, Money::new(1_000.0, currency))]),
+            events: vec![],
+        };
+
+        analyzer.calculate_statistics(&account, &[]);
+
+        assert!(analyzer.unrealized_pnls.is_empty());
+        assert!(analyzer.snapshot_balance_adjustments.is_empty());
+        assert_eq!(analyzer.statistics().pnls["USD"]["PnL (total)"], 0.0);
+    }
+
+    #[rstest]
+    fn test_unrealized_pnls_is_equity_less_balances() {
+        let currency = Currency::USD();
+        let accounts = [cash_account_with_balance("SIM-001", 100_000.0, currency)];
+        let snapshot = snapshot_with_balance("SIM-001", 100_000.0, 101_500.0, currency, 1);
+
+        let mut analyzer = PortfolioAnalyzer::new();
+        analyzer.set_unrealized_pnls_from_snapshots(&accounts, &[&snapshot]);
+
+        assert_eq!(
+            analyzer.unrealized_pnl_for(&currency),
+            Some(&Money::new(1_500.0, currency))
+        );
+    }
+
+    /// The contribution is paired with balances read at call time, so a snapshot whose own
+    /// balances have since moved must be rejected rather than double counting what was realized
+    /// in between.
+    #[rstest]
+    fn test_unrealized_pnls_rejects_snapshot_whose_balances_drifted() {
+        let currency = Currency::USD();
+        // Balances have moved on to 110_000 since the snapshot recorded 100_000.
+        let accounts = [cash_account_with_balance("SIM-001", 110_000.0, currency)];
+        let snapshot = snapshot_with_balance("SIM-001", 100_000.0, 101_500.0, currency, 1);
+
+        let mut analyzer = PortfolioAnalyzer::new();
+        analyzer.set_unrealized_pnls_from_snapshots(&accounts, &[&snapshot]);
+
+        assert_eq!(analyzer.unrealized_pnl_for(&currency), None);
+    }
+
+    #[rstest]
+    fn test_unrealized_pnls_skips_snapshot_with_unpriced_instruments() {
+        let currency = Currency::USD();
+        let accounts = [cash_account_with_balance("SIM-001", 100_000.0, currency)];
+        let mut snapshot = snapshot_with_balance("SIM-001", 100_000.0, 101_500.0, currency, 1);
+        snapshot.unpriced_instruments = vec![instrument_id_aud_usd_sim()];
+
+        let mut analyzer = PortfolioAnalyzer::new();
+        analyzer.set_unrealized_pnls_from_snapshots(&accounts, &[&snapshot]);
+
+        // An unresolvable valuation must leave the contribution absent rather than understated.
+        assert_eq!(analyzer.unrealized_pnl_for(&currency), None);
+    }
+
+    #[rstest]
+    fn test_unrealized_pnls_uses_latest_snapshot_per_account() {
+        let currency = Currency::USD();
+        let accounts = [cash_account_with_balance("SIM-001", 100_000.0, currency)];
+        let earlier = snapshot_with_balance("SIM-001", 100_000.0, 101_500.0, currency, 1);
+        let latest = snapshot_with_balance("SIM-001", 100_000.0, 99_250.0, currency, 2);
+
+        let mut analyzer = PortfolioAnalyzer::new();
+        analyzer.set_unrealized_pnls_from_snapshots(&accounts, &[&earlier, &latest]);
+
+        assert_eq!(
+            analyzer.unrealized_pnl_for(&currency),
+            Some(&Money::new(-750.0, currency))
+        );
+    }
+
+    /// Every account must contribute, otherwise a partial mark-to-market would be summed against
+    /// full balances and understate rather than simply be absent.
+    #[rstest]
+    fn test_unrealized_pnls_is_all_or_nothing_across_accounts() {
+        let currency = Currency::USD();
+        let accounts = [
+            cash_account_with_balance("SIM-001", 100_000.0, currency),
+            cash_account_with_balance("SIM-002", 50_000.0, currency),
+        ];
+        // Only the first account produced a snapshot.
+        let snapshot = snapshot_with_balance("SIM-001", 100_000.0, 101_500.0, currency, 1);
+
+        let mut analyzer = PortfolioAnalyzer::new();
+        analyzer.set_unrealized_pnls_from_snapshots(&accounts, &[&snapshot]);
+
+        assert_eq!(analyzer.unrealized_pnl_for(&currency), None);
+    }
+
+    #[rstest]
+    fn test_unrealized_pnls_sums_across_accounts() {
+        let currency = Currency::USD();
+        let accounts = [
+            cash_account_with_balance("SIM-001", 100_000.0, currency),
+            cash_account_with_balance("SIM-002", 50_000.0, currency),
+        ];
+        let a = snapshot_with_balance("SIM-001", 100_000.0, 101_500.0, currency, 1);
+        let b = snapshot_with_balance("SIM-002", 50_000.0, 50_250.0, currency, 1);
+
+        let mut analyzer = PortfolioAnalyzer::new();
+        analyzer.set_unrealized_pnls_from_snapshots(&accounts, &[&a, &b]);
+
+        assert_eq!(
+            analyzer.unrealized_pnl_for(&currency),
+            Some(&Money::new(1_750.0, currency))
+        );
+    }
+
+    #[rstest]
+    fn test_unrealized_pnls_cleared_by_reset() {
+        let currency = Currency::USD();
+        let accounts = [cash_account_with_balance("SIM-001", 100_000.0, currency)];
+        let snapshot = snapshot_with_balance("SIM-001", 100_000.0, 101_500.0, currency, 1);
+
+        let mut analyzer = PortfolioAnalyzer::new();
+        analyzer.set_unrealized_pnls_from_snapshots(&accounts, &[&snapshot]);
+        assert!(analyzer.unrealized_pnl_for(&currency).is_some());
+
+        analyzer.reset();
+        assert_eq!(analyzer.unrealized_pnl_for(&currency), None);
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn test_unrealized_pnls_clears_previous_value_when_latest_is_invalid(#[case] stale: bool) {
+        let currency = Currency::USD();
+        let accounts = [cash_account_with_balance("SIM-001", 100_000.0, currency)];
+        let earlier = snapshot_with_balance("SIM-001", 100_000.0, 101_500.0, currency, 1);
+        let mut latest = earlier.clone();
+        latest.ts_event = UnixNanos::from(2);
+        latest.is_stale = stale;
+
+        if !stale {
+            latest
+                .unpriced_instruments
+                .push(instrument_id_aud_usd_sim());
+        }
+
+        let mut analyzer = PortfolioAnalyzer::new();
+        analyzer.set_unrealized_pnls_from_snapshots(&accounts, &[&earlier]);
+        assert!(analyzer.unrealized_pnl_for(&currency).is_some());
+
+        analyzer.set_unrealized_pnls_from_snapshots(&accounts, &[&latest, &earlier]);
+
+        assert_eq!(analyzer.unrealized_pnl_for(&currency), None);
+    }
+
+    #[rstest]
+    fn test_calculate_statistics_clears_unrealized_pnls_from_previous_snapshot() {
+        let currency = Currency::USD();
+        let accounts = [cash_account_with_balance("SIM-001", 100_000.0, currency)];
+        let snapshot = snapshot_with_balance("SIM-001", 100_000.0, 101_500.0, currency, 1);
+        let mut analyzer = PortfolioAnalyzer::new();
+        analyzer.set_unrealized_pnls_from_snapshots(&accounts, &[&snapshot]);
+        let account = MockAccount {
+            starting_balances: AHashMap::from_iter([(currency, Money::new(100_000.0, currency))]),
+            current_balances: AHashMap::from_iter([(currency, Money::new(100_000.0, currency))]),
+            events: vec![],
+        };
+
+        analyzer.calculate_statistics(&account, &[]);
+
+        assert_eq!(analyzer.unrealized_pnl_for(&currency), None);
+        assert_eq!(analyzer.statistics().pnls["USD"]["PnL (total)"], 0.0);
+    }
+
     #[rstest]
     fn test_calculate_snapshot_returns_tracks_daily_mark_to_market_equity() {
         let account_id = AccountId::new("SIM-001");
@@ -1338,7 +2002,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_calculate_snapshot_returns_forward_fills_unpriced_dates() {
+    fn test_calculate_snapshot_returns_rejects_unpriced_daily_close() {
         let account_id = AccountId::new("SIM-001");
         let currency = Currency::USD();
         let first =
@@ -1355,19 +2019,136 @@ mod tests {
         let snapshots = [first, unpriced, last];
 
         let returns =
+            PortfolioAnalyzer::calculate_snapshot_returns(&[account_id], snapshots.iter());
+
+        assert!(returns.is_none());
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn test_calculate_snapshot_returns_accepts_repriced_daily_close(#[case] stale: bool) {
+        let account_id = AccountId::new("SIM-001");
+        let currency = Currency::USD();
+        let first =
+            create_portfolio_snapshot(account_id, Decimal::from(100), currency, NANOSECONDS_IN_DAY);
+        let mut incomplete = create_portfolio_snapshot(
+            account_id,
+            Decimal::ZERO,
+            currency,
+            NANOSECONDS_IN_DAY + NANOSECONDS_IN_DAY / 2,
+        );
+        incomplete.is_stale = stale;
+
+        if !stale {
+            incomplete
+                .unpriced_instruments
+                .push(instrument_id_aud_usd_sim());
+        }
+
+        let close = create_portfolio_snapshot(
+            account_id,
+            Decimal::from(110),
+            currency,
+            2 * NANOSECONDS_IN_DAY,
+        );
+        let snapshots = [first, incomplete, close];
+
+        let returns =
+            PortfolioAnalyzer::calculate_snapshot_returns(&[account_id], snapshots.iter()).unwrap();
+
+        assert_eq!(
+            returns,
+            BTreeMap::from([(UnixNanos::from(NANOSECONDS_IN_DAY), 0.1)])
+        );
+    }
+
+    #[rstest]
+    #[case([0, 1, 2])]
+    #[case([0, 2, 1])]
+    #[case([1, 0, 2])]
+    #[case([1, 2, 0])]
+    #[case([2, 0, 1])]
+    #[case([2, 1, 0])]
+    fn test_calculate_snapshot_returns_orders_snapshots_by_event_time(#[case] order: [usize; 3]) {
+        let account_id = AccountId::new("SIM-001");
+        let currency = Currency::USD();
+        let snapshots = [
+            create_portfolio_snapshot(account_id, Decimal::from(100), currency, NANOSECONDS_IN_DAY),
+            create_portfolio_snapshot(
+                account_id,
+                Decimal::from(110),
+                currency,
+                NANOSECONDS_IN_DAY + NANOSECONDS_IN_DAY / 2,
+            ),
+            create_portfolio_snapshot(
+                account_id,
+                Decimal::from(120),
+                currency,
+                2 * NANOSECONDS_IN_DAY,
+            ),
+        ];
+
+        let returns = PortfolioAnalyzer::calculate_snapshot_returns(
+            &[account_id],
+            order.iter().map(|index| &snapshots[*index]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            returns,
+            BTreeMap::from([(UnixNanos::from(NANOSECONDS_IN_DAY), 0.2)])
+        );
+    }
+
+    #[rstest]
+    fn test_set_portfolio_returns_clears_previous_series_when_refresh_fails() {
+        let account_id = AccountId::new("SIM-001");
+        let currency = Currency::USD();
+        let first =
+            create_portfolio_snapshot(account_id, Decimal::from(100), currency, NANOSECONDS_IN_DAY);
+        let mut last = create_portfolio_snapshot(
+            account_id,
+            Decimal::from(110),
+            currency,
+            2 * NANOSECONDS_IN_DAY,
+        );
+        let mut analyzer = PortfolioAnalyzer::new();
+        analyzer.add_return(UnixNanos::from(NANOSECONDS_IN_DAY), 0.5);
+        analyzer.set_portfolio_returns_from_snapshots(&[account_id], [&first, &last]);
+        assert!(!analyzer.portfolio_returns().is_empty());
+
+        last.is_stale = true;
+        analyzer.set_portfolio_returns_from_snapshots(&[account_id], [&first, &last]);
+
+        assert!(analyzer.portfolio_returns().is_empty());
+        assert_eq!(analyzer.returns(), analyzer.position_returns());
+        assert!(analyzer.uses_fallback_returns());
+    }
+
+    #[rstest]
+    fn test_snapshot_returns_preserves_small_changes_on_large_equity() {
+        let account_id = AccountId::new("SIM-001");
+        let currency = Currency::USD();
+        let starting = Decimal::from(1_000_000_000);
+        let snapshots = [
+            create_portfolio_snapshot(account_id, starting, currency, NANOSECONDS_IN_DAY),
+            create_portfolio_snapshot(
+                account_id,
+                starting + Decimal::new(1, 2),
+                currency,
+                2 * NANOSECONDS_IN_DAY,
+            ),
+        ];
+
+        let returns =
             PortfolioAnalyzer::calculate_snapshot_returns(&[account_id], snapshots.iter()).unwrap();
 
         assert!(approx_eq!(
             f64,
             returns[&UnixNanos::from(NANOSECONDS_IN_DAY)],
-            0.0,
-            epsilon = 1e-12
-        ));
-        assert!(approx_eq!(
-            f64,
-            returns[&UnixNanos::from(2 * NANOSECONDS_IN_DAY)],
-            0.1,
-            epsilon = 1e-12
+            1e-11,
+            epsilon = 1e-23
         ));
     }
 
@@ -1487,6 +2268,31 @@ mod tests {
             .total_pnl_percentage(Some(&currency), Some(&unrealized_pnl))
             .unwrap();
         assert!(approx_eq!(f64, result, 100.0, epsilon = 1e-9)); // (2000 - 1000) / 1000 * 100
+    }
+
+    #[rstest]
+    fn test_total_pnl_preserves_small_changes_on_large_balances() {
+        let currency = Currency::USD();
+        let starting = Decimal::from(1_000_000_000);
+        let mut analyzer = PortfolioAnalyzer::new();
+        analyzer
+            .account_balances_starting
+            .insert(currency, Money::from_decimal(starting, currency).unwrap());
+        analyzer.account_balances.insert(
+            currency,
+            Money::from_decimal(starting + Decimal::new(1, 2), currency).unwrap(),
+        );
+        let unrealized = Money::from_decimal(Decimal::new(2, 2), currency).unwrap();
+
+        let total = analyzer
+            .total_pnl(Some(&currency), Some(&unrealized))
+            .unwrap();
+        let percentage = analyzer
+            .total_pnl_percentage(Some(&currency), Some(&unrealized))
+            .unwrap();
+
+        assert_eq!(total, 0.03);
+        assert!(approx_eq!(f64, percentage, 3e-9, epsilon = 1e-21));
     }
 
     #[rstest]
@@ -1645,9 +2451,20 @@ mod tests {
         assert!(pnl_stats.contains_key("PnL% (total)"));
         assert!(pnl_stats.contains_key("test_stat"));
 
-        // Test returns stats
+        // Test returns stats. The mock account carries no state events, so mark-to-market equity
+        // returns cannot be resolved and the alias degrades to per-trade price returns - which the
+        // reported key must say, so the two incomparable variants cannot share it.
         let return_stats = analyzer.get_performance_stats_returns();
-        assert!(return_stats.contains_key("test_stat"));
+        assert!(analyzer.uses_fallback_returns());
+        assert!(return_stats.contains_key(&format!("test_stat {FALLBACK_RETURNS_SUFFIX}")));
+        assert!(
+            !return_stats.contains_key("test_stat"),
+            "the unqualified key must be absent rather than carrying a different meaning"
+        );
+
+        // Asking for that series explicitly is not a degradation, so it is reported unqualified.
+        let position_return_stats = analyzer.get_performance_stats_position_returns();
+        assert!(position_return_stats.contains_key("test_stat"));
 
         // Test general stats
         let general_stats = analyzer.get_performance_stats_general();
@@ -2138,6 +2955,73 @@ mod tests {
     }
 
     #[rstest]
+    fn test_load_accounts_with_snapshots_replaces_previous_analysis() {
+        let currency = Currency::USD();
+        let accounts = [cash_account_with_balance("SIM-001", 100_000.0, currency)];
+        let positions = [create_mock_position("POS-1", 100.0, 0.1, currency)];
+        let snapshots = [
+            snapshot_with_balance(
+                "SIM-001",
+                100_000.0,
+                100_000.0,
+                currency,
+                NANOSECONDS_IN_DAY,
+            ),
+            snapshot_with_balance(
+                "SIM-001",
+                100_000.0,
+                101_500.0,
+                currency,
+                2 * NANOSECONDS_IN_DAY,
+            ),
+        ];
+        let mut analyzer = PortfolioAnalyzer::new();
+        analyzer.register_statistic(Arc::new(MockStatistic::new("custom")));
+
+        for _ in 0..2 {
+            analyzer.load_accounts_with_snapshots(
+                &accounts,
+                &positions,
+                &[],
+                snapshots.iter(),
+                AHashMap::new(),
+            );
+        }
+
+        assert_eq!(analyzer.positions.len(), 1);
+        assert_eq!(
+            analyzer.trade_pnl_records(Some(&currency)).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            analyzer.account_balances[&currency].as_decimal(),
+            Decimal::from(100_000)
+        );
+        assert_eq!(
+            analyzer.account_balances_starting[&currency].as_decimal(),
+            Decimal::from(100_000)
+        );
+        assert_eq!(
+            analyzer.unrealized_pnl_for(&currency).unwrap().as_decimal(),
+            Decimal::from(1_500)
+        );
+        assert_eq!(analyzer.portfolio_returns().len(), 1);
+        assert_eq!(analyzer.statistics.len(), 1);
+        assert!(analyzer.statistic("custom").is_some());
+
+        analyzer.load_accounts_with_snapshots(&[], &[], &[], &[], AHashMap::new());
+
+        assert!(analyzer.positions.is_empty());
+        assert!(analyzer.account_balances.is_empty());
+        assert!(analyzer.account_balances_starting.is_empty());
+        assert!(analyzer.unrealized_pnls.is_empty());
+        assert!(analyzer.returns().is_empty());
+        assert!(analyzer.portfolio_returns().is_empty());
+        assert!(analyzer.position_returns().is_empty());
+        assert!(analyzer.statistic("custom").is_some());
+    }
+
+    #[rstest]
     fn test_statistics_snapshot_matches_getters() {
         let currency = Currency::USD();
         let positions = vec![
@@ -2186,7 +3070,7 @@ mod tests {
     fn test_get_performance_stats_returns_vs_benchmark() {
         let mut analyzer = PortfolioAnalyzer::new();
         analyzer.register_statistic(Arc::new(BetaRatio::new()));
-        analyzer.register_statistic(Arc::new(SharpeRatio::new(None)));
+        analyzer.register_statistic(Arc::new(SharpeRatio::new(None, None)));
 
         let one_day = 86_400_000_000_000_u64;
         let start = 1_600_000_000_000_000_000_u64;

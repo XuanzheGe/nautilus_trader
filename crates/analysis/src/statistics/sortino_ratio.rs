@@ -48,21 +48,33 @@ use crate::{Returns, statistic::PortfolioStatistic};
 )]
 pub struct SortinoRatio {
     period: usize,
+    /// The per-period risk-free rate (default: 0.0).
+    risk_free_rate: f64,
 }
 
 impl SortinoRatio {
     /// Creates a new [`SortinoRatio`] instance.
     #[must_use]
-    pub fn new(period: Option<usize>) -> Self {
+    pub fn new(period: Option<usize>, risk_free_rate: Option<f64>) -> Self {
         Self {
             period: period.unwrap_or(252),
+            risk_free_rate: risk_free_rate.unwrap_or(0.0),
         }
     }
 }
 
 impl Display for SortinoRatio {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Sortino Ratio ({} days)", self.period)
+        if self.risk_free_rate == 0.0 {
+            // Keep the default name stable: it is the key used in the produced statistics map.
+            write!(f, "Sortino Ratio ({} days)", self.period)
+        } else {
+            write!(
+                f,
+                "Sortino Ratio ({} days, rf {})",
+                self.period, self.risk_free_rate
+            )
+        }
     }
 }
 
@@ -94,7 +106,8 @@ impl PortfolioStatistic for SortinoRatio {
             return Some(f64::NAN);
         }
 
-        let annualized_ratio = (mean / downside) * (self.period as f64).sqrt();
+        let excess = mean - self.risk_free_rate;
+        let annualized_ratio = (excess / downside) * (self.period as f64).sqrt();
 
         Some(annualized_ratio)
     }
@@ -131,7 +144,7 @@ mod tests {
 
     #[rstest]
     fn test_empty_returns() {
-        let ratio = SortinoRatio::new(None);
+        let ratio = SortinoRatio::new(None, None);
         let returns = create_returns(&[]);
         let result = ratio.calculate_from_returns(&returns);
         assert!(result.is_some());
@@ -140,7 +153,7 @@ mod tests {
 
     #[rstest]
     fn test_zero_downside_deviation() {
-        let ratio = SortinoRatio::new(None);
+        let ratio = SortinoRatio::new(None, None);
         let returns = create_returns(&[0.02, 0.03, 0.01]);
         let result = ratio.calculate_from_returns(&returns);
         assert!(result.is_some());
@@ -149,7 +162,7 @@ mod tests {
 
     #[rstest]
     fn test_valid_sortino_ratio() {
-        let ratio = SortinoRatio::new(Some(252));
+        let ratio = SortinoRatio::new(Some(252), None);
         let returns = create_returns(&[-0.01, 0.02, -0.015, 0.005, -0.02]);
         let result = ratio.calculate_from_returns(&returns);
         assert!(result.is_some());
@@ -163,7 +176,7 @@ mod tests {
 
     #[rstest]
     fn test_name() {
-        let ratio = SortinoRatio::new(None);
+        let ratio = SortinoRatio::new(None, None);
         assert_eq!(ratio.name(), "Sortino Ratio (252 days)");
     }
 }
